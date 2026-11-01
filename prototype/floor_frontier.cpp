@@ -153,9 +153,12 @@ static bool ranks(const Mesh &m) {
 
 struct Level { std::string name; std::vector<Mesh> problems; std::vector<double> es; };
 
-int main() {
-	const double H[] = { 0.002, 0.005, 0.02 };
-	const double E[] = { 0.0005, 0.001, 0.002 };
+// With the argument "body": rdp_error is the body mesh's median edge length (3.46 mm, avatar.obj) and the
+// edge lengths are the median edges of (A)Hair_Acc, (A)Skirt and (B)Spats (1.25, 4.0, 12.3 mm).
+int main(int argc, char **argv) {
+	const bool body = argc > 1 && std::string(argv[1]) == "body";
+	const double H[] = { body ? 0.00125 : 0.002, body ? 0.004 : 0.005, body ? 0.0123 : 0.02 };
+	const double E[] = { body ? 0.00346 : 0.0005, body ? 0.00346 : 0.001, body ? 0.00346 : 0.002 };
 	std::vector<Level> levels;
 	int skipped = 0;
 	auto add_fold = [&](const char *name, double theta_deg, int want /* 1 ridge, 0 non-ridge */) {

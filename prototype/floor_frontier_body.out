@@ -1,0 +1,15 @@
+problems skipped (neither clearly a ridge nor clearly inside e): 15
+
+level (problems)                  old15         none        rdp_1        rdp_2        rdp_4 all(planted)
+flat, ripple within e (9)     0/9  r+0.00    0/9  r+0.00    0/9  r+0.00    0/9  r+0.00    0/9  r+0.00    9/9  r+0.00
+sphere, ripple within e (9)    0/9  r+0.00    0/9  r+0.00    0/9  r+0.00    0/9  r+0.00    0/9  r+0.00    9/9  r+0.00
+fold 90 deg (ridge) (9)       0/9  r+0.00    0/9  r+0.00    0/9  r+0.00    0/9  r+0.00    0/9  r+0.00    0/9  r+0.00
+fold 30 deg (ridge) (3)       0/3  r+0.00    0/3  r+0.00    0/3  r+0.00    0/3  r+0.00    0/3  r+0.00    0/3  r+0.00
+fold 10 deg (ridge) (0)       0/0  rnan    0/0  rnan    0/0  rnan    0/0  rnan    0/0  rnan    0/0  rnan
+fold 3 deg (inside e) (9)     0/9  r+0.00    0/9  r+0.00    0/9  r+0.00    0/9  r+0.00    0/9  r+0.00    9/9  r+0.00
+fold 1 deg (inside e) (9)     0/9  r+0.00    0/9  r+0.00    0/9  r+0.00    0/9  r+0.00    0/9  r+0.00    9/9  r+0.00
+ridge levels where the score alone ranks every ridge edge above every other edge: 3 of 12
+
+frontier success              0/48         0/48         0/48         0/48         0/48        36/48     
+ridge edges missed             14/240          0/240         29/240         63/240         99/240        240/240    
+non-ridge edges kept        1535793/1911240   1911240/1911240   922142/1911240   654420/1911240   512158/1911240       0/1911240 
