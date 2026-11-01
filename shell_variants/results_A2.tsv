@@ -1,0 +1,8 @@
+level	gap	defect	outcome	first_pair_id	seconds
+L2	1	no	succeeded		365
+L2	2	no	succeeded		240
+L2	2	no	succeeded		364
+L2	4	no	succeeded		529
+L2	0.5	no	succeeded		375
+L3	1	no	succeeded		742
+L3	2	no	succeeded		636
