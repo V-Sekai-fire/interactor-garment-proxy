@@ -130,8 +130,10 @@ func _init() -> void:
 	status.position = Vector2(14, 10)
 	status.add_theme_font_size_override("font_size", 22)
 	root.add_child(status)
+	var trs := []   # the preview shows the last colour frame, not the live viewport, which spends two thirds of its time on the UV passes
 	for i in 2:
 		var tr := TextureRect.new()
+		trs.append(tr)
 		tr.expand_mode = TextureRect.EXPAND_IGNORE_SIZE
 		tr.texture = vps[i][0].get_texture()
 		tr.position = Vector2(10 + i * 570, 50)
@@ -178,10 +180,12 @@ func _init() -> void:
 				for pr in all_mis[i]:
 					pr[0].material_override = pr[1]
 				img = await _shot(vps[i][0], 8)
+				trs[i].texture = ImageTexture.create_from_image(img)
 				passes = []
 				for md in 2:
 					for pr in all_mis[i]:
 						pr[0].material_override = uvmats[md][pr[3]] if pr[2] else uvmats[2][pr[3]]
+					status.text = "camera %d of %d, %s: UV pass %s" % [v + 1, lists[i].size(), titles[i], "u" if md == 0 else "v"]
 					passes.append(await _shot(vps[i][0], 6))
 				for pr in all_mis[i]:
 					pr[0].material_override = pr[1]
