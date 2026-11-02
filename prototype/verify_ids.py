@@ -8,7 +8,7 @@ folder, out = sys.argv[1:3]
 import json, glob, os
 PAD = 100
 NV = max(len(glob.glob(f"{folder}/v*_c0.png")), len(glob.glob(f"{folder}/v*_c1.png")))
-d = aruco.getPredefinedDictionary(aruco.DICT_4X4_1000)
+d = aruco.getPredefinedDictionary(getattr(aruco, open("suit_dictionary.txt").read().strip()) if os.path.exists("suit_dictionary.txt") else aruco.DICT_4X4_1000)
 det = aruco.ArucoDetector(d, aruco.DetectorParameters())
 META = json.load(open("boards_meta.json"))
 def meshes_of(i):
@@ -59,7 +59,7 @@ def run(c, v):
         sp = np.array(pts)
         mean, mx, pidx = err_mm(sp, int(i), INSET, BOARD)
         mids = meshes_of(pidx)
-        ctl = err_mm(sp, (int(i) + 1) % 1000, INSET, BOARD)   # planted control: the neighbouring id
+        ctl = err_mm(sp, (int(i) + 1) % len(d.bytesList), INSET, BOARD)   # planted control: the neighbouring id
         ok = mean < 4.0 and mx < 8.0 and mesh in mids
         okc = ctl[0] < 4.0 and ctl[1] < 8.0
         rows.append((mesh, int(i), "correct" if ok else "WRONG", (mean, mx, okc, mesh in mids), q))

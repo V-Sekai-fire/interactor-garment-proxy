@@ -5,7 +5,7 @@
 import os, sys, json, glob, numpy as np, cv2, cv2.aruco as aruco
 folder, out = sys.argv[1], sys.argv[2]
 MINPX = int(sys.argv[3]) if len(sys.argv) > 3 else 1500; MAXC = int(sys.argv[4]) if len(sys.argv) > 4 else 24; NCAM = int(sys.argv[5]) if len(sys.argv) > 5 else 40
-d = aruco.getPredefinedDictionary(aruco.DICT_4X4_1000); det = aruco.ArucoDetector(d, aruco.DetectorParameters())
+d = aruco.getPredefinedDictionary(getattr(aruco, open("suit_dictionary.txt").read().strip()) if os.path.exists("suit_dictionary.txt") else aruco.DICT_4X4_1000); det = aruco.ArucoDetector(d, aruco.DetectorParameters())
 suit = json.load(open("suit_markers.json")); W, H = 49 * 45, 65 * 45
 lab_all = np.full((H, W), -1, np.int32); quad = {}; ids_of = {}
 for m in suit: q = np.array(m["quad"], np.float32); quad[m["idx"]] = q; ids_of[m["idx"]] = m["id"]; cv2.fillPoly(lab_all, [np.round(q).astype(np.int32)], m["idx"])

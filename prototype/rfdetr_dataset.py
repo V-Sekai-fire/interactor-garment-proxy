@@ -64,7 +64,7 @@ for cell in cell_names:
                 if bx1 - bx0 < 4 or by1 - by0 < 4: continue
                 p = a["poly"] - [x0c, y0c]; p = np.clip(p, 0, TILE)
                 tile_anns.append(dict(id=aid, image_id=iid, category_id=1, bbox=[bx0, by0, bx1 - bx0, by1 - by0], area=float((bx1 - bx0) * (by1 - by0)), iscrowd=0, keypoints=[round(float(v), 2) for v in kp.flatten()], num_keypoints=int((kp[:, 2] > 0).sum()),
-                                      segmentation=[[round(float(v), 1) for v in p.flatten()]] if len(p) >= 3 else [], marker_id=a["id"], aruco_id=a["id"] % 1000, visible_frac=round(a["vis"], 3))); aid += 1
+                                      segmentation=[[round(float(v), 1) for v in p.flatten()]] if len(p) >= 3 else [], marker_id=a["id"], aruco_id=int(suit[a["id"]]["id"]), visible_frac=round(a["vis"], 3))); aid += 1
             if not tile_anns and np.random.default_rng(iid).random() > 0.1: continue   # keep 10% of empty tiles as negatives
             fn = f"{cell}_{x0c}_{y0c}.jpg"; cv2.imwrite(f"{out}/{name}/{fn}", im[y0c:y0c + TILE, x0c:x0c + TILE], [cv2.IMWRITE_JPEG_QUALITY, 95])
             images.append(dict(id=iid, file_name=fn, width=TILE, height=TILE, cell=cell)); anns += tile_anns; iid += 1

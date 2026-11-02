@@ -5,7 +5,7 @@
 import os, sys, json, glob, numpy as np, cv2, cv2.aruco as aruco
 folder = sys.argv[1]
 MIN_PX = int(sys.argv[2]) if len(sys.argv) > 2 else 500
-d = aruco.getPredefinedDictionary(aruco.DICT_4X4_1000)
+d = aruco.getPredefinedDictionary(getattr(aruco, open("suit_dictionary.txt").read().strip()) if os.path.exists("suit_dictionary.txt") else aruco.DICT_4X4_1000)
 det = aruco.ArucoDetector(d, aruco.DetectorParameters())
 META = json.load(open("boards_meta.json"))
 suit = json.load(open("suit_markers.json"))
