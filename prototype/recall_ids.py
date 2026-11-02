@@ -25,6 +25,7 @@ def mesh_of(i):
 tot = {}
 union = {}
 reads = {}
+wellc = {}
 NV = max(len(glob.glob(f"{folder}/v*_c0.png")), len(glob.glob(f"{folder}/v*_c1.png")))
 print("cameras:", NV)
 print("view col  mesh   well-seen  read(of well-seen)  recall   read-but-not-well-seen")
@@ -66,6 +67,8 @@ for v in range(NV):
                 for idx in cand.get(k, []):
                     if name in meshes_of(idx) and idx in present: mine.add(idx)
             hit = mine & well
+            wcnt = wellc.setdefault((c, name), {})
+            for k_ in well: wcnt[k_] = wcnt.get(k_, 0) + 1   # in how many cameras this marker is well seen (ground truth)
             t = tot.setdefault((c, name), [0, 0, 0, 0]); t[0] += len(well); t[1] += len(hit); t[2] += len(mine - well); t[3] += len(mine)
             rc_ = reads.setdefault((c, name), {})
             for idx_ in mine: rc_[idx_] = rc_.get(idx_, 0) + 1   # in how many cameras this marker was read correctly
@@ -78,3 +81,6 @@ for (c, name), (on, well, rd) in sorted(union.items()):
     two = sum(1 for k in on if rcount.get(k, 0) >= 2); one = sum(1 for k in on if rcount.get(k, 0) >= 1); wl = sum(1 for k in well if rcount.get(k, 0) >= 2)
     print(f"TRACKED {'input ' if c == 0 else 'fitted'} {name:5s} markers on the mesh {len(on)}: read in 1+ cameras {one} ({100.0 * one / max(len(on), 1):.1f}%), in 2+ cameras (can be triangulated) {two} ({100.0 * two / max(len(on), 1):.1f}%); of the {len(well)} well seen by some camera, 2+ reads: {wl} ({100.0 * wl / max(len(well), 1):.1f}%)")
     print(f"ALL CAMERAS {'input ' if c == 0 else 'fitted'} {name:5s} markers on the mesh {len(on)}, read by some camera {len(rd & on)} ({100.0 * len(rd & on) / max(len(on), 1):.1f}%); well seen by some camera {len(well)}, of those read {len(rd & well)} ({100.0 * len(rd & well) / max(len(well), 1):.1f}%)")
+
+import json as _json   # per-marker read counts, for the neighbour-prediction check
+_json.dump({f"{c}:{name}": {"on": sorted(int(k) for k in on), "reads": {str(k): int(v) for k, v in reads.get((c, name), {}).items()}, "well": {str(k): int(v) for k, v in wellc.get((c, name), {}).items()}} for (c, name), (on, well, rd) in union.items()}, open("reads.json", "w"))
