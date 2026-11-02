@@ -28,8 +28,9 @@ def anc(i):
 chain = {"leftIndex": 0}
 for s in ("left", "right"):
     if s + "LowerLeg" in H and s + "UpperLeg" not in H: H[s + "UpperLeg"] = par[H[s + "LowerLeg"]]   # an upper leg is the parent of its lower leg
-if "hips" not in H and "leftUpperLeg" in H and "rightUpperLeg" in H:
-    common = [a for a in anc(H["leftUpperLeg"]) if a in set(anc(H["rightUpperLeg"]))]; H["hips"] = common[0]   # hips: nearest common ancestor of both legs
+if "hips" not in H:   # hips: the nearest common ancestor of both legs, the spine and the head (a rig may hang the legs off a lower-body bone, with the spine beside it)
+    sets = [set(anc(H[k])) for k in ("leftUpperLeg", "rightUpperLeg", "spine", "head")]
+    H["hips"] = next(a for a in anc(H["leftUpperLeg"]) if all(a in t for t in sets))
 for s in ("left", "right"):   # a finger bone needs the one before it in its chain
     for f in ("Thumb", "Index", "Middle", "Ring", "Little"):
         names = [s + f + k for k in (("Metacarpal", "Proximal", "Distal") if f == "Thumb" else ("Proximal", "Intermediate", "Distal"))]
