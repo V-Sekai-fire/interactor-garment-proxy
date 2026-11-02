@@ -1,37 +1,37 @@
 # Proof that a detected marker is the right one: decode the UV at each detected corner (u and v as 16 bits in the
 # _u / _v images from godot/fit_sheet.gd) and compare with where that id sits on its own board, in mm. Correct = mean
 # error under 4 mm, max under 8 mm, and the id belongs to the mesh the pixel colour says. A neighbouring id is the
-# planted control and must never be accepted. Run in the folder holding dict6x6_2000.npy, boards_meta.json and the
-# board PNGs: python prototype/verify_ids.py <cells dir> <overview.png>
+# planted control and must never be accepted. Run in the folder holding suit_markers.json and boards_meta.json
+# (prototype/make_suit_board.py): python prototype/verify_ids.py <cells dir> <overview.png>
 import sys, numpy as np, cv2, cv2.aruco as aruco
 folder, out = sys.argv[1:3]
-import json
+import json, glob, os
 PAD = 100
-d = aruco.Dictionary(np.load("dict6x6_2000.npy"), 6, 4)
+NV = max(len(glob.glob(f"{folder}/v*_c0.png")), len(glob.glob(f"{folder}/v*_c1.png")))
+d = aruco.getPredefinedDictionary(aruco.DICT_4X4_1000)
 det = aruco.ArucoDetector(d, aruco.DetectorParameters())
 META = json.load(open("boards_meta.json"))
+def meshes_of(i):
+    return [n for n, m in META.items() if m["first"] <= i < m["first"] + m["count"]]
 def mesh_of(i):
     for n, m in META.items():
         if m["first"] <= i < m["first"] + m["count"]: return n
     return None
-# ground truth: where each id sits on the clean sheet (sheet px, detector corner order)
-truth = {}
-for name in META:
-    bi = cv2.copyMakeBorder(cv2.imread(f"board_{name}.png", 0), PAD, PAD, PAD, PAD, cv2.BORDER_CONSTANT, value=255)
-    c0, i0, _, _ = det.detectMarkersWithConfidence(bi)
-    for q, i in zip(c0, i0.flatten()):
-        truth.setdefault(int(i), []).append(q.reshape(4, 2) - PAD)
-print("ids located:", len(truth), "placements:", sum(len(v) for v in truth.values()), "(each id once:", all(len(v) == 1 for v in truth.values()), ")")
+# ground truth: the real suit board, every marker by its board position idx (ids repeat past 1000, so an id can mean two places)
+suit = json.load(open("suit_markers.json")); truth = {}
+for m in suit: truth.setdefault(m["id"], []).append((m["idx"], np.array(m["quad"])))
+BOARD = np.array([49 * 45, 65 * 45], float)
+print("markers on the board:", len(suit), "; distinct ids:", len(truth), "; ids that sit in two places:", sum(len(v) > 1 for v in truth.values()))
 def err_mm(sheet_pts, idx, inset_w, SZ):
-    """smallest over placements of idx of the mean/max corner error, in mm (toroidal)."""
-    best = (1e9, 1e9)
-    for q in truth.get(idx, []):
+    """best placement of id idx: (mean, max corner error in mm, board idx), toroidal."""
+    best = (1e9, 1e9, -1)
+    for pidx, q in truth.get(idx, []):
         c = q.mean(axis=0)
         exp = c + inset_w * (q - c)
         dlt = sheet_pts - exp
         dlt -= np.round(dlt / SZ) * SZ
         e = np.linalg.norm(dlt, axis=1) / 1.5     # 1500 px/m -> 1.5 px/mm
-        if e.mean() < best[0]: best = (float(e.mean()), float(e.max()))
+        if e.mean() < best[0]: best = (float(e.mean()), float(e.max()), pidx)
     return best
 INSET = 0.7
 def decode(U, V, M, pt, WH):
@@ -52,30 +52,24 @@ def run(c, v):
     if ids is None: return im, rows
     for q, i in zip(corners, ids.flatten()):
         q = q.reshape(4, 2); ctr = q.mean(axis=0)
-        px = q.astype(np.int32); m = np.zeros(M.shape, np.uint8); cv2.fillPoly(m, [px], 1)
-        sel = im[m > 0].astype(int)
-        br = sel[sel.sum(axis=1) >= np.percentile(sel.sum(axis=1), 60)]
-        mesh = "skirt" if br[:, 2].mean() > br[:, 0].mean() + 20 else "body"
-        mid = mesh_of(int(i))
-        if mid is None:
-            rows.append((mesh, int(i), "WRONG", (999.0, 999.0, False, False), q)); continue
-        WH = np.array([META[mid]["w"], META[mid]["h"]], float)
-        pts = [decode(U, V, M, ctr + INSET * (p - ctr), WH) for p in q]
+        mesh = "skirt" if U[int(np.clip(ctr[1], 0, U.shape[0] - 1)), int(np.clip(ctr[0], 0, U.shape[1] - 1)), 0] >= 128 else "body"   # mesh id from the UV pass
+        pts = [decode(U, V, M, ctr + INSET * (p - ctr), BOARD) for p in q]
         if any(p is None for p in pts):
             rows.append((mesh, int(i), "unverifiable", None, q)); continue
         sp = np.array(pts)
-        mean, mx = err_mm(sp, int(i), INSET, WH)
-        f0, n0 = META[mid]["first"], META[mid]["count"]
-        ctl = err_mm(sp, f0 + ((int(i) - f0 + 1) % n0), INSET, WH)   # planted control: neighbouring id of the same mesh
-        ok = mean < 4.0 and mx < 8.0 and mid == mesh
+        mean, mx, pidx = err_mm(sp, int(i), INSET, BOARD)
+        mids = meshes_of(pidx)
+        ctl = err_mm(sp, (int(i) + 1) % 1000, INSET, BOARD)   # planted control: the neighbouring id
+        ok = mean < 4.0 and mx < 8.0 and mesh in mids
         okc = ctl[0] < 4.0 and ctl[1] < 8.0
-        rows.append((mesh, int(i), "correct" if ok else "WRONG", (mean, mx, okc, mid == mesh), q))
+        rows.append((mesh, int(i), "correct" if ok else "WRONG", (mean, mx, okc, mesh in mids), q))
     return im, rows
 tiles = {}
 tot = {}
 print("view col  mesh  detected correct WRONG unverifiable  mean_err_mm(correct)  planted-control-accepted  id/colour-mismatch")
-for v in range(4):
+for v in range(NV):
     for c in range(2):
+        if not os.path.exists(f"{folder}/v{v}_c{c}.png"): continue
         im, rows = run(c, v)
         ov = im.copy()
         for mesh, i, st, info, q in rows:
@@ -107,8 +101,9 @@ for v in range(4):
             t = tot.setdefault((c, mesh), [0, 0, 0, 0, 0, 0]); t[0]+=n; t[1]+=k; t[2]+=w; t[3]+=u; t[4]+=cc; t[5]+=mm
 for (c, mesh), t in sorted(tot.items()):
     print(f"TOTAL {'start' if c==0 else 'fit  '} {mesh:5s} detected {t[0]} correct {t[1]} wrong {t[2]} unverifiable {t[3]} control-accepted {t[4]} id/colour-mismatch {t[5]}")
+if NV > 16: sys.exit(0)   # no overview sheet for a long camera list
 h, w = tiles[(0, 0)].shape[:2]
-sheet = np.full((h*2 + 70, w*4, 3), 18, np.uint8)
+sheet = np.full((h*((NV + 1) // 2) + 70, w*4, 3), 18, np.uint8)
 cv2.putText(sheet, "Unique ids per mesh (body 0-1149, skirt 1150-1814): green = right id and place, red = wrong", (12, 28), cv2.FONT_HERSHEY_SIMPLEX, 0.8, (240, 240, 240), 2)
 cv2.putText(sheet, "left: cloth-fit input    right: fitted (same UV layout on the skirt)", (12, 58), cv2.FONT_HERSHEY_SIMPLEX, 0.7, (200, 200, 200), 1)
 for (v, c), t in tiles.items():
