@@ -30,7 +30,7 @@ lab = np.full((H, W), -1, np.int32)
 tri = np.full((H, W), -1, np.int32)
 for t, f in enumerate(F):
     cv2.fillConvexPoly(lab, np.round(uv[f]).astype(np.int32), int(chart_of[t])); cv2.fillConvexPoly(tri, np.round(uv[f]).astype(np.int32), t)
-d = tagfamily.get(DICT); NID = len(d.bytesList)
+d = tagfamily.get(DICT); NID = len(d.bytesList); SHIFT = int(os.environ.get("ID_SHIFT", "0"))   # ID_SHIFT moves every id to another position (a test that tells pattern faults from position faults)
 canvas = np.full((H * RS, W * RS), 70, np.uint8); markers = []; area_total = int((lab >= 0).sum())
 for c in range(NCH):
     ys, xs = np.nonzero(lab == c)
@@ -52,9 +52,9 @@ for c in range(NCH):
             n = int((tot == S * S).sum())
             if n > best[0]: best = (n, dx, dy, (Xi[tot == S * S], Yi[tot == S * S]))
     n, dx, dy, cells = best
-    # paint the island: checker by cell parity, dark grey for white squares that could not hold a whole marker
+    # paint the island: checker by cell parity, as on the real board: white (255) and black (0), no grey
     yy, xx = np.mgrid[y0:y1, x0:x1]; i = (xx - x0 - dx + 2 * S) // S; j = (yy - y0 - dy + 2 * S) // S
-    col = np.where((i + j) % 2 == 0, 95, 0).astype(np.uint8); mask = (lab[y0:y1, x0:x1] == c)
+    col = np.where((i + j) % 2 == 0, 255, 0).astype(np.uint8); mask = (lab[y0:y1, x0:x1] == c)
     big = np.kron(col, np.ones((RS, RS), np.uint8)); bm = np.kron(mask.astype(np.uint8), np.ones((RS, RS), np.uint8)).astype(bool)
     sub = canvas[y0 * RS:y1 * RS, x0 * RS:x1 * RS]; sub[bm] = big[bm]
     if cells is not None:
@@ -63,15 +63,24 @@ for c in range(NCH):
             if k >= NID: break
             px, py = x0 + int(X), y0 + int(Y)
             canvas[py * RS:(py + S) * RS, px * RS:(px + S) * RS] = 255
-            canvas[(py + INSET) * RS:(py + INSET + MK) * RS, (px + INSET) * RS:(px + INSET + MK) * RS] = aruco.generateImageMarker(d, k, MK * RS, borderBits=1)
+            canvas[(py + INSET) * RS:(py + INSET + MK) * RS, (px + INSET) * RS:(px + INSET + MK) * RS] = aruco.generateImageMarker(d, (k + SHIFT) % NID, MK * RS, borderBits=1)
             qx, qy = px + INSET, py + INSET
-            markers.append({"idx": k, "id": k, "chart": int(c), "square": [int(px), int(py)], "quad": [[int(qx), int(qy)], [int(qx) + MK, int(qy)], [int(qx) + MK, int(qy) + MK], [int(qx), int(qy) + MK]]})
+            markers.append({"idx": k, "id": (k + SHIFT) % NID, "chart": int(c), "square": [int(px), int(py)], "quad": [[int(qx), int(qy)], [int(qx) + MK, int(qy)], [int(qx) + MK, int(qy) + MK], [int(qx), int(qy) + MK]]})
 # ---- gates ----
+# real size: the squares are S px, so the surface must be unwrapped at S px per (30 mm * MARKER_SCALE); xatlas shrinks any island bigger than a fixed sheet, so check it
+MS = float(os.environ.get("MARKER_SCALE", "1.0")); target = 1500.0 / MS
+a3 = 0.5 * np.linalg.norm(np.cross(V[F[:, 1]] - V[F[:, 0]], V[F[:, 2]] - V[F[:, 0]]), axis=1)
+e1 = uv[F[:, 1]] - uv[F[:, 0]]; e2 = uv[F[:, 2]] - uv[F[:, 0]]; a2 = 0.5 * np.abs(e1[:, 0] * e2[:, 1] - e1[:, 1] * e2[:, 0])
+okt = a3 > 1e-12; dens = np.sqrt(a2[okt] / a3[okt]); wts = a3[okt]
+within = float(wts[np.abs(dens / target - 1) < 0.15].sum() / wts.sum()); med = float(np.median(dens))
+
 fail = 0
 def gate(name, ok, detail=""):
     global fail
     print(("PASS " if ok else "FAIL ") + name + (" " + detail if detail else "")); fail += 0 if ok else 1
+REALSIZE = (within >= 0.85)
 inside = all(len(set(np.unique(lab[m_["square"][1]:m_["square"][1] + S, m_["square"][0]:m_["square"][0] + S]).tolist())) == 1 and lab[m_["square"][1], m_["square"][0]] == m_["chart"] for m_ in markers)
+gate("real size: at least 85% of the surface is within 15% of the target texel density", REALSIZE, f"({100 * within:.0f}% within; median {med:.0f} px/m, target {target:.0f})")
 gate("every marker square lies inside one island", inside, f"({len(markers)} markers, {NCH} islands)")
 occ = np.zeros((H, W), np.int32)
 for m_ in markers: occ[m_["square"][1]:m_["square"][1] + S, m_["square"][0]:m_["square"][0] + S] += 1
