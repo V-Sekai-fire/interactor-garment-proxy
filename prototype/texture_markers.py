@@ -30,8 +30,8 @@ lab = np.full((H, W), -1, np.int32)
 tri = np.full((H, W), -1, np.int32)
 for t, f in enumerate(F):
     cv2.fillConvexPoly(lab, np.round(uv[f]).astype(np.int32), int(chart_of[t])); cv2.fillConvexPoly(tri, np.round(uv[f]).astype(np.int32), t)
-d = tagfamily.get(DICT); NID = len(d.bytesList); SHIFT = int(os.environ.get("ID_SHIFT", "0"))   # ID_SHIFT moves every id to another position (a test that tells pattern faults from position faults)
-canvas = np.full((H * RS, W * RS), 70, np.uint8); markers = []; area_total = int((lab >= 0).sum())
+d = tagfamily.get(DICT); NID = len(d.bytesList); SHIFT = int(os.environ.get("ID_SHIFT", "0")); DROP = set(json.load(open(os.environ["DROP_IDS"]))) if os.environ.get("DROP_IDS") else set()   # DROP_IDS: json list of ids that failed the dead-on gate   # ID_SHIFT moves every id to another position (a test that tells pattern faults from position faults)
+canvas = np.full((H * RS, W * RS), 70, np.uint8); markers = []; dropped = []; area_total = int((lab >= 0).sum())
 for c in range(NCH):
     ys, xs = np.nonzero(lab == c)
     if len(xs) < S * S: continue
@@ -59,8 +59,10 @@ for c in range(NCH):
     sub = canvas[y0 * RS:y1 * RS, x0 * RS:x1 * RS]; sub[bm] = big[bm]
     if cells is not None:
         for X, Y in zip(*cells):
-            k = len(markers)
+            k = len(markers) + len(dropped)   # a dropped marker keeps its id as a hole, so every other marker stays as it was
             if k >= NID: break
+            if (k + SHIFT) % NID in DROP:
+                dropped.append(k); continue
             px, py = x0 + int(X), y0 + int(Y)
             canvas[py * RS:(py + S) * RS, px * RS:(px + S) * RS] = 255
             canvas[(py + INSET) * RS:(py + INSET + MK) * RS, (px + INSET) * RS:(px + INSET + MK) * RS] = aruco.generateImageMarker(d, (k + SHIFT) % NID, MK * RS, borderBits=1)

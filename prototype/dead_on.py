@@ -36,7 +36,8 @@ else:
         # visible if the camera sees at least 1.5 pixels per atlas pixel of the marker's quad... (resolution differs), so require MINPX pixels in the frame
         if n_px < MINPX: blocked += 1; continue
         seen += 1
-        _, ids, _, _ = det.detectMarkersWithConfidence(cv2.cvtColor(im, cv2.COLOR_BGR2GRAY)); got = ids is not None and t in set(ids.flatten().tolist())
+        hh, ww = im.shape[:2]; C = int(os.environ.get("CROP", "480")); g = cv2.cvtColor(im, cv2.COLOR_BGR2GRAY)[max(hh // 2 - C // 2, 0):hh // 2 + C // 2, max(ww // 2 - C // 2, 0):ww // 2 + C // 2]   # the target is at the centre: detect on a crop, which is much faster
+        _, ids, _, _ = det.detectMarkersWithConfidence(g); got = ids is not None and t in set(ids.flatten().tolist())
         ok += bool(got)
         if not got: bad.append((k, t, n_px))
     print(f"dead-on: {len(tg)} cameras; marker seen (>= {MINPX} px): {seen}; blocked or off-surface: {blocked}; read with own id: {ok} ({100 * ok / max(seen, 1):.2f}%)")
