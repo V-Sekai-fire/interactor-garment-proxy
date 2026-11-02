@@ -27,6 +27,14 @@ a result on its own: read `MEASUREMENTS.md` for what was measured and what faile
   `sphere_hammersley_sequence`, rendered by SubViewports (RFD66606-2370). A control that points
   a camera away must fail.
 - `godot/csg_union.gd`: the union of thickened shells that did not work.
+- `godot/fit_sheet.gd`: contact sheet of a cloth-fit result, input against fitted, with each mesh
+  textured by its own ArUco board on real UVs; the window shows every render as it is made.
+- `godot/explode_host.gd`: runs model_explode's `explode.gd` on OBJ files and renders the layout.
+- `godot/csg_clip.gd`: body INTERSECT garment with Godot's Manifold CSG; empty means no clipping, and
+  a planted `--shift` must make the overlap grow.
+- `prototype/make_boards.py`, `prototype/verify_ids.py`: unique ArUco ids per mesh (one custom 6x6
+  dictionary, one board per mesh), and a readback that checks each detected marker sits where its
+  id belongs on the board, in mm, with a planted wrong-id control.
 
 Meshes are not stored here: the garments are exported from the character project, and the
 proxy is 4.8 million triangles.
