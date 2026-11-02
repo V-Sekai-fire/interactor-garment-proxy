@@ -2,6 +2,7 @@
 import sys, time
 import numpy as np
 src, out, D, H = sys.argv[1], sys.argv[2], float(sys.argv[3]), float(sys.argv[4])
+FLOOD = len(sys.argv) > 5 and sys.argv[5] == "--flood"  # nested shells (air bubbles) are not solid
 V=[];F=[]
 for l in open(src):
     t=l.split()
@@ -50,6 +51,25 @@ for i,(ia,ib,ic) in enumerate(F):
 print("distance field %.1fs"%(time.time()-t0),flush=True)
 
 f=G-np.float32(D)
+if FLOOD:
+    # Air-bubble shells (a shell nested in a shell) are not solid: flood the outside from the grid
+    # corner, which the padding keeps outside, and call every cell the flood cannot reach inside.
+    # The level surface then has the outer envelope only, with no inner shell and no pocket.
+    outside_c=(f>=0)
+    reach=np.zeros_like(outside_c); reach[0,0,0]=True
+    n_prev=-1
+    while True:
+        nxt=reach.copy()
+        nxt[1:]|=reach[:-1]; nxt[:-1]|=reach[1:]
+        nxt[:,1:]|=reach[:,:-1]; nxt[:,:-1]|=reach[:,1:]
+        nxt[:,:,1:]|=reach[:,:,:-1]; nxt[:,:,:-1]|=reach[:,:,1:]
+        nxt&=outside_c
+        n=int(nxt.sum())
+        if n==n_prev: break
+        n_prev=n; reach=nxt
+    pockets=int((outside_c&~reach).sum())
+    print("flood fill: outside cells %d, enclosed pocket cells filled %d"%(n_prev,pockets),flush=True)
+    f=np.where(outside_c&~reach,np.float32(-1e-3),f)
 inside=f<0
 cx=np.zeros((nx,ny,nz),bool)
 s=np.zeros((nx-1,ny-1,nz-1),np.int8)
