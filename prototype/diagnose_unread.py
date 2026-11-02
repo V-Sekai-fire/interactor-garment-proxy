@@ -2,11 +2,12 @@
 # the whole marker on the board) and still unread, and cuts out a crop of each with the ground-truth outline drawn (green = read,
 # red = unread), so a placement bug (mirroring, bleeding, wrong squares) can be seen by eye.
 # python diagnose_unread.py <cells dir> <out.png> [MINPX=1500] [max crops=24] [first N cameras=40]   (run where suit_markers.json is)
+import sys as _sys, os as _os; _sys.path.insert(0, _os.path.dirname(_os.path.abspath(__file__))); import tagfamily
 import os, sys, json, glob, numpy as np, cv2, cv2.aruco as aruco
 folder, out = sys.argv[1], sys.argv[2]
 MINPX = int(sys.argv[3]) if len(sys.argv) > 3 else 1500; MAXC = int(sys.argv[4]) if len(sys.argv) > 4 else 24; NCAM = int(sys.argv[5]) if len(sys.argv) > 5 else 40
-d = aruco.getPredefinedDictionary(aruco.DICT_4X4_1000); det = aruco.ArucoDetector(d, aruco.DetectorParameters())
-suit = json.load(open("suit_markers.json")); W, H = 49 * 45, 65 * 45
+d = tagfamily.load_dictionary(); det = aruco.ArucoDetector(d, aruco.DetectorParameters())
+suit = json.load(open("suit_markers.json")); W, H = tagfamily.board_size()[0], tagfamily.board_size()[1]
 lab_all = np.full((H, W), -1, np.int32); quad = {}; ids_of = {}
 for m in suit: q = np.array(m["quad"], np.float32); quad[m["idx"]] = q; ids_of[m["idx"]] = m["id"]; cv2.fillPoly(lab_all, [np.round(q).astype(np.int32)], m["idx"])
 cams = sorted({int(os.path.basename(p).split("_")[0][1:]) for p in glob.glob(f"{folder}/v*_c0.png")})[:NCAM]

@@ -7,7 +7,8 @@
 #   <unwrap.obj> is godot/unwrap_tiles.gd output (with its .json). With a fitted OBJ that has the same faces as <orig.obj>
 #   the same markers are walked on the fitted surface too (out prefix + "_fit"). Needs numpy, opencv (cv2 5.0).
 import os, sys, json, math, numpy as np, cv2
-SQ_MM, MK_MM, PXM = 30.0, 22.0, 1500.0
+MSCALE = float(os.environ.get("MARKER_SCALE", "1.0"))   # 1.0 = 30 mm squares and 22 mm markers; 0.7071 = twice the markers per area
+SQ_MM, MK_MM, PXM = 30.0 * MSCALE, 22.0 * MSCALE, 1500.0 / MSCALE
 GRID, LIFT, MIN_SEP, FILL_SEP = 12, 0.0002, 0.0315, 0.040
 T = (lambda v: v) if os.environ.get("YUP") == "1" else (lambda v: np.stack([v[:, 0], v[:, 2], -v[:, 1]], 1))   # solver Z-up -> Godot Y-up; YUP=1 for meshes that are Y up already (ANNY)
 def read_obj(path):
@@ -135,7 +136,7 @@ def uvmap():
     c0 = (e1 * dv2[:, None] - e2 * dv1[:, None]) / sd; c1 = (-e1 * du2[:, None] + e2 * du1[:, None]) / sd
     ga, gb, gd = np.einsum("ij,ij->i", c0, c0), np.einsum("ij,ij->i", c0, c1), np.einsum("ij,ij->i", c1, c1)
     root = np.sqrt(np.maximum((ga - gd) ** 2 + 4 * gb ** 2, 0)); l1 = (ga + gd + root) / 2; l2 = np.maximum((ga + gd - root) / 2, 1e-18)
-    s1, s2 = np.sqrt(l1) * 1500.0, np.sqrt(l2) * 1500.0; shear = s1 / s2; size = s1 * s2
+    s1, s2 = np.sqrt(l1) * PXM, np.sqrt(l2) * PXM; shear = s1 / s2; size = s1 * s2
     print(f"tile geometry per triangle: shear s1/s2 median {np.median(shear):.2f}, p95 {np.percentile(shear, 95):.2f}, {100.0 * (shear <= 1.2).mean():.0f}% within 1.2; size factor p5 {np.percentile(size, 5):.2f}, p95 {np.percentile(size, 95):.2f}, {100.0 * ((size > 0.85) & (size < 1.18)).mean():.0f}% within 15%")
     # seam report: a 3D edge whose two triangles do not share the same pair of vertex ids is a seam
     q = lambda p: tuple(np.round(p * 2000).astype(int))        # 0.5 mm bins
@@ -172,7 +173,7 @@ def uvmap():
         if any(v is None for v in cs_): continue
         sq_all += 1; sides = [np.linalg.norm(cs_[i] - cs_[(i + 1) % 4]) / 0.85 for i in range(4)]
         angs = [math.degrees(math.acos(np.clip(np.dot(cs_[(i + 1) % 4] - cs_[i], cs_[(i - 1) % 4] - cs_[i]) / max(np.linalg.norm(cs_[(i + 1) % 4] - cs_[i]) * np.linalg.norm(cs_[(i - 1) % 4] - cs_[i]), 1e-12), -1, 1))) for i in range(4)]
-        if max(abs(x / 0.022 - 1) for x in sides) <= 0.10 and max(abs(a_ - 90) for a_ in angs) <= 8: sq_ok += 1
+        if max(abs(x / (MK_MM / 1000.0) - 1) for x in sides) <= 0.10 and max(abs(a_ - 90) for a_ in angs) <= 8: sq_ok += 1
     print(f"markers that stay square on the surface (sides within 10% of 22 mm and corners within 8 deg of 90, whole markers only): {sq_ok} of {sq_all} ({100.0 * sq_ok / max(sq_all, 1):.0f}%)")
     out = []; stat = dict(intact=0, cut=0, void=0)
     g = np.linspace(0.1, 0.9, 3)

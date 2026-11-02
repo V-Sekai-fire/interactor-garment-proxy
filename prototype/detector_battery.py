@@ -1,9 +1,10 @@
 # Which detector setting recovers the most markers we KNOW are there? Ground truth: markers that are large (>= MINPX screen pixels) and wholly
 # visible, from the UV passes (largest connected piece per marker idx). Each variant reads the full render; a marker counts when its id comes back.
 # python detector_battery.py <cells dir> [N cameras = 12] [MINPX = 1500]      (run where suit_markers.json is)
+import sys as _sys, os as _os; _sys.path.insert(0, _os.path.dirname(_os.path.abspath(__file__))); import tagfamily
 import os, sys, json, glob, numpy as np, cv2, cv2.aruco as aruco
 folder = sys.argv[1]; NCAM = int(sys.argv[2]) if len(sys.argv) > 2 else 12; MINPX = int(sys.argv[3]) if len(sys.argv) > 3 else 1500
-d = aruco.getPredefinedDictionary(aruco.DICT_4X4_1000); suit = json.load(open("suit_markers.json")); W, H = 49 * 45, 65 * 45
+d = tagfamily.load_dictionary(); suit = json.load(open("suit_markers.json")); W, H = tagfamily.board_size()[0], tagfamily.board_size()[1]
 lab_all = np.full((H, W), -1, np.int32); quad = {}; ids_of = {}
 for m in suit: q = np.array(m["quad"], np.float32); quad[m["idx"]] = q; ids_of[m["idx"]] = m["id"]; cv2.fillPoly(lab_all, [np.round(q).astype(np.int32)], m["idx"])
 def P(**kw):

@@ -32,6 +32,9 @@ func _init() -> void:
 	var texs := []
 	for pth in [OS.get_environment("BOARD_BODY"), OS.get_environment("BOARD_SKIRT")]:
 		var im0 := Image.load_from_file(pth)
+		var mx := maxi(im0.get_width(), im0.get_height())
+		if mx > 16000:   # the GPU texture limit is 16384
+			im0.resize(int(im0.get_width() * 16000.0 / mx), int(im0.get_height() * 16000.0 / mx), Image.INTERPOLATE_LANCZOS)
 		im0.generate_mipmaps()
 		texs.append(ImageTexture.create_from_image(im0))
 	var tints := [Color(0.75, 0.85, 1.0), Color(1.0, 0.62, 0.25)]
@@ -167,30 +170,53 @@ func _init() -> void:
 			var up := Vector3(cm["up"][0], cm["up"][1], cm["up"][2])
 			cam.look_at_from_position(Vector3(cm["pos"][0], cm["pos"][1], cm["pos"][2]), Vector3(cm["target"][0], cm["target"][1], cm["target"][2]), up)
 			status.text = "camera %d of %d, %s: decals" % [v + 1, lists[i].size(), titles[i]]
-			vps[i][0].render_target_update_mode = SubViewport.UPDATE_ONCE
-			for f in 6:
-				await process_frame
-			await _drawn()
-			var img: Image = vps[i][0].get_texture().get_image()
-			img.convert(Image.FORMAT_RGB8)
-			img.save_png("%s/v%d_c%d.png" % [OS.get_environment("CELLS"), v, i])
-			for md in 2:
+			for f in 10:
+				await process_frame   # linger: let the camera move and the materials settle before anything is drawn
+			var img: Image
+			var passes := []
+			for attempt in 3:
 				for pr in all_mis[i]:
-					pr[0].material_override = uvmats[md][pr[3]] if pr[2] else uvmats[2][pr[3]]
-				vps[i][0].render_target_update_mode = SubViewport.UPDATE_ONCE
-				for f in 4:
+					pr[0].material_override = pr[1]
+				img = await _shot(vps[i][0], 8)
+				passes = []
+				for md in 2:
+					for pr in all_mis[i]:
+						pr[0].material_override = uvmats[md][pr[3]] if pr[2] else uvmats[2][pr[3]]
+					passes.append(await _shot(vps[i][0], 6))
+				for pr in all_mis[i]:
+					pr[0].material_override = pr[1]
+				if not _same(img, passes[0]) and not _same(img, passes[1]):   # a colour frame equal to a UV pass was captured before the materials changed back
+					break
+				print("retry camera ", v, ": colour frame matches a UV pass")
+				for f in 20:
 					await process_frame
-				await _drawn()
-				var ui: Image = vps[i][0].get_texture().get_image()
-				ui.convert(Image.FORMAT_RGB8)
-				ui.save_png("%s/v%d_c%d_%s.png" % [OS.get_environment("CELLS"), v, i, "u" if md == 0 else "v"])
-			for pr in all_mis[i]:
-				pr[0].material_override = pr[1]
-			vps[i][0].render_target_update_mode = SubViewport.UPDATE_ONCE
-			for f in 3:
+			img.save_png("%s/v%d_c%d.png" % [OS.get_environment("CELLS"), v, i])
+			passes[0].save_png("%s/v%d_c%d_u.png" % [OS.get_environment("CELLS"), v, i])
+			passes[1].save_png("%s/v%d_c%d_v.png" % [OS.get_environment("CELLS"), v, i])
+			for f in 6:
 				await process_frame
 	print("saved cells")
 	quit(0)
+
+# Draws the viewport twice and keeps the second image: the first draw can still show the state before the last change.
+func _shot(vp: SubViewport, frames: int) -> Image:
+	for rep in 2:
+		vp.render_target_update_mode = SubViewport.UPDATE_ONCE
+		for f in frames:
+			await process_frame
+		await _drawn()
+	var im: Image = vp.get_texture().get_image()
+	im.convert(Image.FORMAT_RGB8)
+	return im
+
+func _same(a: Image, b: Image) -> bool:
+	if a.get_size() != b.get_size():
+		return false
+	var x: Image = a.duplicate()
+	var y: Image = b.duplicate()
+	x.resize(64, 64)
+	y.resize(64, 64)
+	return x.get_data() == y.get_data()
 
 # Waits for the frame to be drawn, but not for ever: a window that is covered or hidden never draws.
 func _drawn() -> void:

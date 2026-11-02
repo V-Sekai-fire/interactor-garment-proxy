@@ -1,0 +1,14 @@
+name = "MarkerDetect"
+version = "0.1.0"
+defaultTargets = ["MarkerDetect"]
+
+[[lean_lib]]
+name = "MarkerDetect"
+
+[[lean_exe]]
+name = "markerdetect_test"
+root = "Test"
+
+[[lean_exe]]
+name = "tagfamily_gen"
+root = "TagFamily"

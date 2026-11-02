@@ -46,6 +46,7 @@ a result on its own: read `MEASUREMENTS.md` for what was measured and what faile
 - `prototype/verify_ids.py`, `prototype/recall_ids.py`: readback with ground truth (a marker is right only if it sits
   where its id belongs, with a planted neighbour-id control) and the paper's measure: the share of all markers read in
   2 or more cameras (so they can be triangulated). `diagnose_unread.py` and `detector_battery.py` explain misses.
+- `prototype/texture_markers.py`: paints the markers into the texture of UVs you already have so that no marker is clipped by a seam (per island, the grid offset that fits the most whole markers); gates first (every marker square in one island, no overlap, unique ids, the clean atlas reads back 100%). `prototype/tagfamily.py` loads any OpenCV dictionary or a custom family made by `lean/MarkerDetect` (`tagfamily_gen`, a pass-fail tag family generator).
 - `prototype/rfdetr_dataset.py`: exact keypoint labels (4 corners per marker, visibility flags, polygons) for RF-DETR.
 - `tools/anny_export.py`: exports the baked ANNY-soma-x body from `solve/core/soma_rig.h` (18,056 vertices, 78 joints)
   with gates and a planted control.
