@@ -11,7 +11,7 @@ if mode == "make":
     for j in range(NP):
         x0 = j * (w + 1.0); base = len(V)
         for (px, py) in ((0, 0), (BW, 0), (BW, BH), (0, BH)):
-            V.append([x0 + px / ppm, py / ppm, 0.0]); VT.append([(j * BW + px) / BW, py / BH])
+            V.append([x0 + px / ppm, (BH - py) / ppm, 0.0])   # atlas rows run down, world y runs up: without this the sheets render mirrored and nothing reads; VT.append([(j * BW + px) / BW, py / BH])
         F += [[base, base + 1, base + 2], [base, base + 2, base + 3]]
         for D, fov, tilt in ((0.8, 30.0, 0.0), (0.55, 30.0, 0.0), (1.2, 30.0, 0.0), (0.8, 30.0, 40.0), (0.8, 30.0, -40.0)):
             fp = 2 * D * math.tan(math.radians(fov / 2)) * 0.85; nx = max(1, math.ceil(w / fp)); ny = max(1, math.ceil(h / fp))
