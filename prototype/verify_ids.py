@@ -3,12 +3,13 @@
 # error under 4 mm, max under 8 mm, and the id belongs to the mesh the pixel colour says. A neighbouring id is the
 # planted control and must never be accepted. Run in the folder holding suit_markers.json and boards_meta.json
 # (prototype/make_suit_board.py): python prototype/verify_ids.py <cells dir> <overview.png>
+import sys as _sys, os as _os; _sys.path.insert(0, _os.path.dirname(_os.path.abspath(__file__))); import tagfamily
 import sys, numpy as np, cv2, cv2.aruco as aruco
 folder, out = sys.argv[1:3]
 import json, glob, os
 PAD = 100
 NV = max(len(glob.glob(f"{folder}/v*_c0.png")), len(glob.glob(f"{folder}/v*_c1.png")))
-d = aruco.getPredefinedDictionary(getattr(aruco, open("suit_dictionary.txt").read().strip()) if os.path.exists("suit_dictionary.txt") else aruco.DICT_4X4_1000)
+d = tagfamily.load_dictionary()
 det = aruco.ArucoDetector(d, aruco.DetectorParameters())
 META = json.load(open("boards_meta.json"))
 def meshes_of(i):
@@ -20,7 +21,7 @@ def mesh_of(i):
 # ground truth: the real suit board, every marker by its board position idx (ids repeat past 1000, so an id can mean two places)
 suit = json.load(open("suit_markers.json")); truth = {}
 for m in suit: truth.setdefault(m["id"], []).append((m["idx"], np.array(m["quad"])))
-BOARD = np.array([49 * 45, 65 * 45], float)
+BOARD = np.array([tagfamily.board_size()[0], tagfamily.board_size()[1]], float)
 print("markers on the board:", len(suit), "; distinct ids:", len(truth), "; ids that sit in two places:", sum(len(v) > 1 for v in truth.values()))
 def err_mm(sheet_pts, idx, inset_w, SZ):
     """best placement of id idx: (mean, max corner error in mm, board idx), toroidal."""
@@ -30,7 +31,7 @@ def err_mm(sheet_pts, idx, inset_w, SZ):
         exp = c + inset_w * (q - c)
         dlt = sheet_pts - exp
         dlt -= np.round(dlt / SZ) * SZ
-        e = np.linalg.norm(dlt, axis=1) / 1.5     # 1500 px/m -> 1.5 px/mm
+        e = np.linalg.norm(dlt, axis=1) / tagfamily.px_per_mm()     # texels per mm of surface
         if e.mean() < best[0]: best = (float(e.mean()), float(e.max()), pidx)
     return best
 INSET = 0.7

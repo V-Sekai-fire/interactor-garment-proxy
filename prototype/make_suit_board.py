@@ -10,7 +10,8 @@ import sys, json, shutil, numpy as np, cv2, cv2.aruco as aruco
 PX, PAD = 45, 100
 BODY = int(sys.argv[1]) if len(sys.argv) > 1 else 950
 DICT = sys.argv[2] if len(sys.argv) > 2 else "DICT_4X4_1000"; RPX = int(sys.argv[3]) if len(sys.argv) > 3 else 45     # RPX: drawn resolution; the layout and quads stay in 45 px squares
-d = aruco.getPredefinedDictionary(getattr(aruco, DICT)); NID = len(d.bytesList)
+import sys as _sys, os as _os; _sys.path.insert(0, _os.path.dirname(_os.path.abspath(__file__))); import tagfamily
+d = tagfamily.get(DICT); NID = len(d.bytesList)
 ids = np.arange(1592) % NID
 open("suit_dictionary.txt", "w").write(DICT)
 b = aruco.CharucoBoard((49, 65), 0.03, 0.022, d, ids); b.setLegacyPattern(True)

@@ -2,16 +2,17 @@
 # view when at least MIN_PX screen pixels show it and those pixels cover at least 85% of its extent on the board in
 # both directions (a seam or a silhouette cuts the rest). Pixels are mapped to markers through the UV passes.
 # python prototype/recall_ids.py <cells dir> [min px]   (run in the folder with suit_markers.json and boards_meta.json)
+import sys as _sys, os as _os; _sys.path.insert(0, _os.path.dirname(_os.path.abspath(__file__))); import tagfamily
 import os, sys, json, glob, numpy as np, cv2, cv2.aruco as aruco
 folder = sys.argv[1]
 MIN_PX = int(sys.argv[2]) if len(sys.argv) > 2 else 500
-d = aruco.getPredefinedDictionary(getattr(aruco, open("suit_dictionary.txt").read().strip()) if os.path.exists("suit_dictionary.txt") else aruco.DICT_4X4_1000)
+d = tagfamily.load_dictionary()
 det = aruco.ArucoDetector(d, aruco.DetectorParameters())
 META = json.load(open("boards_meta.json"))
 suit = json.load(open("suit_markers.json"))
 cand = {}                                   # detected id -> board idx candidates (ids repeat past 1000)
 extent = {}
-lab_all = np.full((65 * 45, 49 * 45), -1, np.int32)
+lab_all = np.full((tagfamily.board_size()[1], tagfamily.board_size()[0]), -1, np.int32)
 for m in suit:
     q = np.array(m["quad"]); cv2.fillPoly(lab_all, [np.round(q).astype(np.int32)], m["idx"])
     extent[m["idx"]] = (np.ptp(q[:, 0]), np.ptp(q[:, 1])); cand.setdefault(m["id"], []).append(m["idx"])
