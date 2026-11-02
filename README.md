@@ -32,9 +32,23 @@ a result on its own: read `MEASUREMENTS.md` for what was measured and what faile
 - `godot/explode_host.gd`: runs model_explode's `explode.gd` on OBJ files and renders the layout.
 - `godot/csg_clip.gd`: body INTERSECT garment with Godot's Manifold CSG; empty means no clipping, and
   a planted `--shift` must make the overlap grow.
-- `prototype/make_boards.py`, `prototype/verify_ids.py`: unique ArUco ids per mesh (one custom 6x6
-  dictionary, one board per mesh), and a readback that checks each detected marker sits where its
-  id belongs on the board, in mm, with a planted wrong-id control.
+- `prototype/make_suit_board.py`: the real SOMA suit board (`CharucoBoard((49, 65), 0.03, 0.022)`, `DICT_4X4_1000`, ids
+  wrapped mod 1000, 1592 markers), with gates (every marker reads back, blank sheet reads none). A marker is told apart
+  by its board position (`idx`); `id = idx % 1000`, `instance = idx // 1000`.
+- `prototype/decals.py`: puts that board on a mesh. `--uvmap` maps it onto xatlas UVs (repeating the sheet across a
+  larger atlas, flipping mirrored charts, reporting seams, shear, size and square markers); the default mode builds
+  one geodesic decal per marker. `YUP=1` for Y-up meshes. `crease_split.py`, `panels_material.py` and
+  `godot/unwrap_tiles.gd`, `godot/unwrap_cyl.gd` are the unwrap experiments; `tools/xatlas_cli.cpp` runs upstream xatlas
+  with every chart and pack option.
+- `prototype/cameras.py`, `godot/fit_decals.gd`: a studio-style camera plan (the fewest cameras that look at every
+  marker head-on, 2-4 views each) and a resumable renderer with a UV pass that gives exact ground truth (written next
+  to the RGB, never part of a training set).
+- `prototype/verify_ids.py`, `prototype/recall_ids.py`: readback with ground truth (a marker is right only if it sits
+  where its id belongs, with a planted neighbour-id control) and the paper's measure: the share of all markers read in
+  2 or more cameras (so they can be triangulated). `diagnose_unread.py` and `detector_battery.py` explain misses.
+- `prototype/rfdetr_dataset.py`: exact keypoint labels (4 corners per marker, visibility flags, polygons) for RF-DETR.
+- `tools/anny_export.py`: exports the baked ANNY-soma-x body from `solve/core/soma_rig.h` (18,056 vertices, 78 joints)
+  with gates and a planted control.
 
 Meshes are not stored here: the garments are exported from the character project, and the
 proxy is 4.8 million triangles.
