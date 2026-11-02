@@ -66,7 +66,7 @@ for n in joints:
 print(f"spring joints {int(isE.sum())} in {len(sizes)} subtrees (size median {int(np.median(sizes))}, max {max(sizes)}); other non-humanoid joints (face, twist, helpers): {int((~isH & ~isE).sum())}")
 def labels(spring):
     Gs = G / np.maximum(G.sum(1, keepdims=True), 1e-9); e = (Gs * spring).sum(1); return e[Tg].mean(1) >= 0.5
-soft = labels(isE); np.savez(out, soft=soft, T=Tg, mesh=MTg, isE=isE, isH=isH)
+soft = labels(isE); np.savez(out, soft=soft, T=Tg, mesh=MTg, isE=isE, isH=isH, hum_names=np.array(list(H)), hum_joint=np.array(list(H.values())), joint_nodes=np.array(joints))
 print("mesh | triangles | soft by count | soft by area"); rows = []
 for mi in range(len(jg["meshes"])):
     k = MTg == mi; rows.append(f"m{mi} {int(k.sum())} {100*soft[k].mean():.0f}% {100*area[k][soft[k]].sum()/area[k].sum():.0f}%")
