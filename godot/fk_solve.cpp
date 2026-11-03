@@ -10,7 +10,7 @@
 // bone_fit.gd already verifies against the Unity bake).
 // Variables per variable joint (9, a mask says which are free; the others keep their initial value):
 //   dt (3): local translation added to the prefab local translation
-//   dr (3): axis-angle, local rotation = exp(dr) * prefab local rotation
+//   dr (3): axis-angle in the bone's own local axes, local rotation = prefab local rotation * exp(dr)
 //   ls (3): log scale, local scale = prefab local scale * exp(ls)
 // Cost = sum_v uw_v |skinned_v - target_v|^2 + reg_t |dt|^2 + reg_r |dr|^2 + reg_s |ls|^2  (free parameters).
 // The Jacobian is by the chain rule through FK: a parameter of joint m moves the world matrix of every joint j in the subtree of m by
@@ -195,7 +195,7 @@ static Aff local_of(const Problem &P, int j, const double *p) {
 	} else {
 		double E[9];
 		expRot(p + 3, E);
-		mul3(E, &P.R0[j * 9], R);
+		mul3(&P.R0[j * 9], E, R);
 		for (int i = 0; i < 3; i++) { s[i] = P.s0[j * 3 + i] * std::exp(p[6 + i]); t[i] = P.pos0[j * 3 + i] + p[i]; }
 	}
 	for (int i = 0; i < 3; i++)
@@ -409,7 +409,7 @@ static void write_output(const char *path, const Problem &P, const vector<double
 			const double *p = &par[(size_t)P.vidx[j] * 9];
 			double E[9];
 			expRot(p + 3, E);
-			mul3(E, &P.R0[j * 9], R);
+			mul3(&P.R0[j * 9], E, R);
 			for (int i = 0; i < 3; i++) { s[i] = P.s0[j * 3 + i] * std::exp(p[6 + i]); t[i] = P.pos0[j * 3 + i] + p[i]; }
 		} else {
 			std::memcpy(R, &P.R0[j * 9], sizeof(R));
