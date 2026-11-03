@@ -51,6 +51,7 @@ FREE = (["pelvis_tz", "pelvis_ty", "pelvis_tx", "pelvis_tilt", "pelvis_list", "p
         + ["L5_S1_FE", "L5_S1_LB", "L5_S1_AR", "T12_L1_FE", "T12_L1_LB", "T12_L1_AR", "T1_head_neck_FE", "T1_head_neck_LB", "T1_head_neck_AR"]
         + [f"{j}_{s}" for s in "rl" for j in ("elv_angle", "shoulder_elv", "shoulder_rot", "elbow_flexion", "pro_sup", "deviation", "flexion")])
 ANKLE_SOLE = 0.055  # [m] ankle joint to the sole, the model's colliding ankle height (SOMA feet are the same scale)
+RESTART_VAL = 0.02  # [m^2] a frame whose solve ends above this restarts from other poses when Rig.restart is set
 W_FLOOR = 100.0  # weight of the foot-capsule floor penalty against the squared site error (both m^2)
 FLOOR_MARGIN = 0.001  # [m] keep the colliding foot capsules this far above z = 0
 TOL_FLOOR, TOL_FLOOR_FRAC = 0.002, 0.05  # gate: deepest capsule point [m] and the fraction of frames more than 1 mm under
@@ -122,6 +123,7 @@ class Rig:
         self.caps = [(g, int(m.geom_bodyid[g])) for g in range(m.ngeom) if m.geom_type[g] == mujoco.mjtGeom.mjGEOM_CAPSULE
                      and (m.geom_contype[g] or m.geom_conaffinity[g]) and m.body(m.geom_bodyid[g]).name.split("_")[0] in ("calcn", "toes")]
         self.w_floor = W_FLOOR
+        self.restart, self.restarts_used = False, 0  # opt-in: restart a stuck frame from other poses (Rig.solve)
         self.ground = None  # optional height of the ground under a world xy (stairs, ramps); None is the flat floor at z = 0
 
     def sites(self):
@@ -211,6 +213,16 @@ class Rig:
                 s, J = self.sites_jac()
                 x[:3] = np.linalg.lstsq(J[:3, :3], tgt[:3] - s[0], rcond=None)[0]
             res = minimize(fun, x, jac=True, method="L-BFGS-B", bounds=bounds, options={"maxiter": 400, "ftol": 1e-14, "gtol": 1e-9})
+            if self.restart and res.fun > RESTART_VAL:  # stuck in a local minimum (a toe caught on a riser): start again from other poses
+                d.qpos[:] = 0.0
+                mujoco.mj_kinematics(m, d)
+                s0, J0 = self.sites_jac()
+                slides = np.linalg.lstsq(J0[:3, :3], tgt[:3] - s0[0], rcond=None)[0]
+                for start in (np.r_[slides, x[3:]], np.r_[slides, np.zeros(len(x) - 3)]):
+                    alt = minimize(fun, start, jac=True, method="L-BFGS-B", bounds=bounds, options={"maxiter": 400, "ftol": 1e-14, "gtol": 1e-9})
+                    if alt.fun < res.fun:
+                        res = alt
+                self.restarts_used += 1
             x = res.x
             q[f, self.free] = x
         return q
