@@ -275,7 +275,7 @@ def main():
         sc = segment_scales(rig, S)
         T = build_targets(S, sc)
         T_plain = T
-        if "--no-plant" not in sys.argv:  # foot planting (plant_feet.py, after interactor-xr-pilot Body.cpp) on the targets
+        if "--plant" in sys.argv:  # foot planting, off by default (plant_feet.py, after interactor-xr-pilot Body.cpp) on the targets
             from plant_feet import foot_floor_heights, plant_feet
 
             ix = {n: i for i, n in enumerate(SITE_NAMES)}
@@ -300,7 +300,7 @@ def main():
         print(f"  GATE 1 site errors under tolerance: {'PASS' if gate1 else 'FAIL'}")
         if not gate1:
             fails.append(f"{name}: site errors")
-        # gate 3: the colliding foot capsules stay above the floor; control = the same targets without planting and without the floor term
+        # gate 3: the colliding foot capsules stay above the floor; control = the same targets without the floor term
         depth = rig.floor_depth(q)
         g3 = depth.max() <= TOL_FLOOR and (depth > 0.001).mean() < TOL_FLOOR_FRAC
         print(f"  GATE 3 floor: deepest {depth.max() * 1000:.1f} mm, frames over 1 mm {(depth > 0.001).mean():.0%} -> {'PASS' if g3 else 'FAIL'}")
@@ -310,7 +310,7 @@ def main():
         d0 = rig.floor_depth(rig.solve(T_plain))
         rig.w_floor = W_FLOOR
         c3 = d0.max() <= TOL_FLOOR and (d0 > 0.001).mean() < TOL_FLOOR_FRAC
-        print(f"  CONTROL 3 no planting, no floor term: deepest {d0.max() * 1000:.1f} mm, frames over 1 mm {(d0 > 0.001).mean():.0%} -> gate {'PASS' if c3 else 'FAIL'} (must FAIL)")
+        print(f"  CONTROL 3 without the floor term: deepest {d0.max() * 1000:.1f} mm, frames over 1 mm {(d0 > 0.001).mean():.0%} -> gate {'PASS' if c3 else 'FAIL'} (must FAIL)")
         if c3:
             fails.append(f"{name}: control 3 did not fail")
         # control 1: the shins asked 30% wrong must fail the same gate
