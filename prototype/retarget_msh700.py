@@ -49,6 +49,9 @@ FREE = (["pelvis_tz", "pelvis_ty", "pelvis_tx", "pelvis_tilt", "pelvis_list", "p
         + [f"{j}_{s}" for s in "rl" for j in ("hip_flexion", "hip_adduction", "hip_rotation", "knee_angle", "ankle_angle", "subtalar_angle")]
         + ["L5_S1_FE", "L5_S1_LB", "L5_S1_AR", "T12_L1_FE", "T12_L1_LB", "T12_L1_AR", "T1_head_neck_FE", "T1_head_neck_LB", "T1_head_neck_AR"]
         + [f"{j}_{s}" for s in "rl" for j in ("elv_angle", "shoulder_elv", "shoulder_rot", "elbow_flexion", "pro_sup", "deviation", "flexion")])
+W_FLOOR = 100.0  # weight of the foot-capsule floor penalty against the squared site error (both m^2)
+FLOOR_MARGIN = 0.001  # [m] keep the colliding foot capsules this far above z = 0
+TOL_FLOOR, TOL_FLOOR_FRAC = 0.002, 0.05  # gate: deepest capsule point [m] and the fraction of frames more than 1 mm under
 LAMBDA_PREV, LAMBDA_ZERO = 1e-5, 1e-5  # tie the angles the 17 positions cannot see (twists, wrist) to the last frame and to zero
 # SOMA (x left, y up, z forward) to the model (x forward, y left, z up): a cyclic permutation, det +1
 C = np.array([[0.0, 0.0, 1.0], [1.0, 0.0, 0.0], [0.0, 1.0, 0.0]])
@@ -104,6 +107,11 @@ class Rig:
             self.bodies.append([m.body(n).id for n in names])
         mujoco.mj_forward(m, self.d)
         self.rest = self.sites()
+        # colliding capsules on the calcn and toes: the floor term keeps their lowest points above z = 0 (the retarget fits 17 site
+        # positions only, so foot pitch is free and the capsules otherwise sink ~2 cm)
+        self.caps = [(g, int(m.geom_bodyid[g])) for g in range(m.ngeom) if m.geom_type[g] == mujoco.mjtGeom.mjGEOM_CAPSULE
+                     and (m.geom_contype[g] or m.geom_conaffinity[g]) and m.body(m.geom_bodyid[g]).name.split("_")[0] in ("calcn", "toes")]
+        self.w_floor = W_FLOOR
 
     def sites(self):
         return np.array([np.mean([self.d.xpos[b] for b in bs], axis=0) for bs in self.bodies])
@@ -119,6 +127,36 @@ class Rig:
                 mujoco.mj_jacBody(m, d, jp, None, b)
                 J[k] += jp / len(bs)
         return self.sites(), J[:, :, self.free].reshape(-1, len(self.free))
+
+    def floor_terms(self):
+        """Sum of squared depths of the capsule bottom end points under FLOOR_MARGIN, and its gradient over the free joints.
+        Call after mj_kinematics and mj_comPos."""
+        m, d = self.m, self.d
+        val, grad, jp = 0.0, np.zeros(len(self.free)), np.zeros((3, m.nv))
+        for g, b in self.caps:
+            Rg, p = d.geom_xmat[g].reshape(3, 3), d.geom_xpos[g]
+            half, rad = m.geom_size[g][1], m.geom_size[g][0]
+            for sign in (-1.0, 1.0):
+                pt = p + sign * Rg[:, 2] * half
+                viol = FLOOR_MARGIN - (pt[2] - rad)
+                if viol > 0:
+                    mujoco.mj_jac(m, d, jp, None, pt, b)
+                    val += viol * viol
+                    grad -= 2.0 * viol * jp[2, self.free]
+        return val, grad
+
+    def floor_depth(self, q):
+        """(F,) deepest point of the colliding foot capsules below z = 0 [m], 0 when above."""
+        m, d = self.m, self.d
+        out = np.zeros(q.shape[0])
+        for f in range(q.shape[0]):
+            d.qpos[:] = q[f]
+            mujoco.mj_kinematics(m, d)
+            for g, _ in self.caps:
+                Rg, p = d.geom_xmat[g].reshape(3, 3), d.geom_xpos[g]
+                low = min((p + Rg[:, 2] * m.geom_size[g][1])[2], (p - Rg[:, 2] * m.geom_size[g][1])[2]) - m.geom_size[g][0]
+                out[f] = max(out[f], -low)
+        return out
 
     def solve(self, targets, bounded=True, tag=""):
         """Per-frame bounded least squares over the free joints, each frame warm-started from the one before."""
@@ -139,7 +177,11 @@ class Rig:
                 s, J = self.sites_jac()
                 r = s.reshape(-1) - tgt
                 val = r @ r + LAMBDA_PREV * np.sum((v - prev) ** 2) + LAMBDA_ZERO * np.sum(v**2)
-                return val, 2 * J.T @ r + 2 * LAMBDA_PREV * (v - prev) + 2 * LAMBDA_ZERO * v
+                grad = 2 * J.T @ r + 2 * LAMBDA_PREV * (v - prev) + 2 * LAMBDA_ZERO * v
+                if self.w_floor:
+                    fv, fg = self.floor_terms()
+                    val, grad = val + self.w_floor * fv, grad + self.w_floor * fg
+                return val, grad
 
             if f == 0:  # root slides first (pelvis site onto its target), then everything
                 d.qpos[:] = 0.0
@@ -232,6 +274,16 @@ def main():
         S = soma_sites(P, names)
         sc = segment_scales(rig, S)
         T = build_targets(S, sc)
+        T_plain = T
+        if "--no-plant" not in sys.argv:  # foot planting (plant_feet.py, after interactor-xr-pilot Body.cpp) on the targets
+            from plant_feet import foot_floor_heights, plant_feet
+
+            ix = {n: i for i, n in enumerate(SITE_NAMES)}
+            feet = {s: {"ankle": ix[f"{s}_ankle"], "toes": ix[f"{s}_toes"], "hip": ix[f"{s}_hip"]} for s in "lr"}
+            fh = foot_floor_heights(rig.m)
+            leg = float(np.mean([np.linalg.norm(rig.rest[ix[f"{s}_hip"]] - rig.rest[ix[f"{s}_knee"]]) + np.linalg.norm(rig.rest[ix[f"{s}_knee"]] - rig.rest[ix[f"{s}_ankle"]]) for s in "lr"]))
+            T, planted, unreachable = plant_feet(T, feet, fh["ankle"], leg, sc["root"], toes_floor_z=fh["toes"])
+            print(f"  planted frames L/R {planted.sum(0)}, unreachable {int(unreachable.sum())}")
         q = rig.solve(T)
         if out_dir:  # the solved qpos of the whole model, (frames, nq), for whoever drives the model with it
             os.makedirs(out_dir, exist_ok=True)
@@ -248,6 +300,19 @@ def main():
         print(f"  GATE 1 site errors under tolerance: {'PASS' if gate1 else 'FAIL'}")
         if not gate1:
             fails.append(f"{name}: site errors")
+        # gate 3: the colliding foot capsules stay above the floor; control = the same targets without planting and without the floor term
+        depth = rig.floor_depth(q)
+        g3 = depth.max() <= TOL_FLOOR and (depth > 0.001).mean() < TOL_FLOOR_FRAC
+        print(f"  GATE 3 floor: deepest {depth.max() * 1000:.1f} mm, frames over 1 mm {(depth > 0.001).mean():.0%} -> {'PASS' if g3 else 'FAIL'}")
+        if not g3:
+            fails.append(f"{name}: foot floor penetration")
+        rig.w_floor = 0.0
+        d0 = rig.floor_depth(rig.solve(T_plain))
+        rig.w_floor = W_FLOOR
+        c3 = d0.max() <= TOL_FLOOR and (d0 > 0.001).mean() < TOL_FLOOR_FRAC
+        print(f"  CONTROL 3 no planting, no floor term: deepest {d0.max() * 1000:.1f} mm, frames over 1 mm {(d0 > 0.001).mean():.0%} -> gate {'PASS' if c3 else 'FAIL'} (must FAIL)")
+        if c3:
+            fails.append(f"{name}: control 3 did not fail")
         # control 1: the shins asked 30% wrong must fail the same gate
         sc_bad = dict(sc, l_ankle=sc["l_ankle"] * PLANT, r_ankle=sc["r_ankle"] * PLANT)  # the ankle segment is the shin (knee -> ankle)
         Tb = build_targets(S, sc_bad)
