@@ -2,7 +2,7 @@
 # The clip is the 30-joint SOMA30 skeleton: per frame and joint 12 float32, a row-major 3x3 local rotation then the local offset
 # (the layout Retarget.lean in interactor-motion-retarget reads: rotation at +0..8, offset at +9..11; Y up, +Z forward, +X left).
 # Method: SOMA joints give 17 sites (pelvis, spine1, head, shoulder, elbow, wrist, hip, knee, ankle, toes; the table of MuscleMimic's
-# smplh_to_myofullbody.json, with head_neck for the head and hand_* for lunate_*). Targets are built down the site tree with one
+# smplh_to_myofullbody.json, with head_neck for the head (SOMA Neck2: the model's neck joints sit at head_neck, so only a point beyond it sees the neck) plus a skull point 5 cm up the head_neck body fitted to SOMA Head, and hand_* for lunate_*). Targets are built down the site tree with one
 # scale per segment (model length / clip length), so the target is reachable in bone length and the gate measures the pose. The
 # per-frame joint angles come from bounded least squares (scipy L-BFGS-B) on the 17 site positions, bounds = the model's joint ranges.
 # Every rotation here is a 3x3 matrix (MuJoCo xmat for the model); no quaternions.
@@ -32,7 +32,8 @@ KNEE_RANGE_DEG, ELBOW_RANGE_DEG = 138.0, 126.0  # as the task states them; read 
 SITES = [
     ("pelvis", ("mid", "femur_r", "femur_l"), ("mid", "RightLeg", "LeftLeg"), None),
     ("spine1", "lumbar1", "Chest", "pelvis"),
-    ("head", "head_neck", "Head", "spine1"),
+    ("head", "head_neck", "Neck2", "spine1"),
+    ("skull", ("point", "head_neck", 0.05), "Head", "head"),
 ]
 for side, S in (("l", "Left"), ("r", "Right")):
     SITES += [
@@ -103,9 +104,17 @@ class Rig:
         self.hi = m.jnt_range[[m.joint(n).id for n in FREE], 1].copy()
         self.bodies = []
         for _, mp, _, _ in SITES:
+            if isinstance(mp, tuple) and mp[0] == "point":
+                self.bodies.append([m.body(mp[1]).id])
+                continue
             names = mp[1:] if isinstance(mp, tuple) else (mp,)
             self.bodies.append([m.body(n).id for n in names])
         mujoco.mj_forward(m, self.d)
+        self.points = {}  # site index -> (body id, offset in the body frame): a point on the body, rigid with it
+        for k, (_, mp, _, _) in enumerate(SITES):
+            if isinstance(mp, tuple) and mp[0] == "point":
+                b = m.body(mp[1]).id
+                self.points[k] = (b, self.d.xmat[b].reshape(3, 3).T @ np.array([0.0, 0.0, mp[2]]))
         self.rest = self.sites()
         # colliding capsules on the calcn and toes: the floor term keeps their lowest points above z = 0 (the retarget fits 17 site
         # positions only, so foot pitch is free and the capsules otherwise sink ~2 cm)
@@ -114,7 +123,10 @@ class Rig:
         self.w_floor = W_FLOOR
 
     def sites(self):
-        return np.array([np.mean([self.d.xpos[b] for b in bs], axis=0) for bs in self.bodies])
+        out = np.array([np.mean([self.d.xpos[b] for b in bs], axis=0) for bs in self.bodies])
+        for k, (b, off) in self.points.items():
+            out[k] = self.d.xpos[b] + self.d.xmat[b].reshape(3, 3) @ off
+        return out
 
     def sites_jac(self):
         """Site positions (17,3) and their Jacobian w.r.t. the free joints (17*3, nfree), after mj_kinematics."""
@@ -124,7 +136,10 @@ class Rig:
         jp = np.zeros((3, m.nv))
         for k, bs in enumerate(self.bodies):
             for b in bs:
-                mujoco.mj_jacBody(m, d, jp, None, b)
+                if k in self.points:
+                    mujoco.mj_jac(m, d, jp, None, d.xpos[b] + d.xmat[b].reshape(3, 3) @ self.points[k][1], b)
+                else:
+                    mujoco.mj_jacBody(m, d, jp, None, b)
                 J[k] += jp / len(bs)
         return self.sites(), J[:, :, self.free].reshape(-1, len(self.free))
 
