@@ -16,7 +16,7 @@ extends SceneTree
 #   --orig / --target: ChibifireFitExport .bin layout (i32 vertex count, i32 triangle count, float32 xyz per vertex, i32 triangle
 #   corners), Unity world metres, in the Unity mesh's vertex order. --deltas: JSON {"deltas_unity_m": [[dx,dy,dz], ...]} added to --orig.
 #   --max-influences N (default 4: Unity skins with at most 4 bones a vertex; 0 = all the FBX gives) --sweeps N (rigid sweeps, 200) --lambda L (fixed ridge; default a sweep when <= 175 bones, else 1e-3)
-#   --exclusive 1 (bones that other meshes of the FBX also weight stay fixed) --freeze "Name,Name" (more fixed bones)
+#   DEFAULT: only bones that no other mesh of the FBX weights and that carry no Miroir bone name may move (--exclusive 0 --analysis-not-applied 1 = analysis, writes no clip). --same-piece "(B)Kimono_Big" (variants of the same garment do not count as other pieces) --freeze "Name,Name" --miroir-prefab <Miroir-Re.prefab> --stage1-analysis <export dir> (analysis only: re-seat shared bones onto the Miroir skeleton, never written as a clip)
 #   --prefab default: Nutty Mapley_SHINANO.prefab next to the FBX's folder. --usd-elf default: usd.post-blendshape.elf in scratchpad.
 # Outputs in --out: <name>_bones_clip_trs.usda (rest frame 0, fitted frame 1), <name>_bones_clip_rt.usda (rigid only),
 #   <name>_fitted_target.usdz, <name>_skinned_newbones.usdz, <name>_bind_skinned.usdz (bind-pose skinned mesh for OpenUSD LBS),
@@ -338,34 +338,77 @@ func run() -> void:
 		bind_tid.append(uname[bn])
 		bnames.append(bn)
 		binds.append(skin.get_bind_pose(j))
-	# bones that must not move: --freeze names, and with --exclusive every bone that another mesh of the FBX also weights
-	# (the outfit's armature is shared by all its pieces, and some of its bones are merged onto the avatar's when worn)
+	# Movable bones: the Miroir body, its skeleton and its bones are READ-ONLY. Only clothing-armature bones that
+	# (a) no other piece of the outfit weights and (b) are not merged onto a Miroir bone by name (Modular Avatar
+	# MergeArmature merges by name) may move. --exclusive 0 (everything free) is analysis only and writes no deliverable.
+	var excl: bool = String(A.get("exclusive", "1")) != "0"
+	analysis_only = (not excl) or A.has("stage1-analysis")
+	if not excl and not A.has("analysis-not-applied"):
+		say("FAIL --exclusive 0 moves shared and Miroir-merged bones; it is analysis only: add --analysis-not-applied 1")
+		fails += 1
+		return
 	var frozen := {}
-	var shared_names := {}
-	if A.has("exclusive"):
-		var stack: Array = [scene]
-		while not stack.is_empty():
-			var nd: Node = stack.pop_back()
-			stack.append_array(nd.get_children())
-			if nd is MeshInstance3D and nd != mi and nd.skin != null and nd.mesh is ArrayMesh:
-				for s in (nd.mesh as ArrayMesh).get_surface_count():
-					var ar := (nd.mesh as ArrayMesh).surface_get_arrays(s)
-					var bb2: PackedInt32Array = ar[Mesh.ARRAY_BONES]
-					var ww2: PackedFloat32Array = ar[Mesh.ARRAY_WEIGHTS]
-					for k in bb2.size():
-						if ww2[k] > 0.0:
-							var bi2: int = (nd.skin as Skin).get_bind_bone(bb2[k])
-							shared_names[sk.get_bone_name(bi2) if bi2 >= 0 else (nd.skin as Skin).get_bind_name(bb2[k])] = true
-		say("--exclusive: %d bones are weighted by other meshes of the FBX" % shared_names.size())
+	shared_names = {}
+	var stack: Array = [scene]
+	var piece_nodes: Array = []
+	while not stack.is_empty():
+		var nd: Node = stack.pop_back()
+		stack.append_array(nd.get_children())
+		if nd is MeshInstance3D and nd != mi and nd.skin != null and nd.mesh is ArrayMesh and not (str(nd.name) in String(A.get("same-piece", "")).split(",", false)):
+			piece_nodes.append(nd)
+			for s in (nd.mesh as ArrayMesh).get_surface_count():
+				var ar := (nd.mesh as ArrayMesh).surface_get_arrays(s)
+				var bb2: PackedInt32Array = ar[Mesh.ARRAY_BONES]
+				var ww2: PackedFloat32Array = ar[Mesh.ARRAY_WEIGHTS]
+				for k in bb2.size():
+					if ww2[k] > 0.0:
+						var bi2: int = (nd.skin as Skin).get_bind_bone(bb2[k])
+						shared_names[sk.get_bone_name(bi2) if bi2 >= 0 else (nd.skin as Skin).get_bind_name(bb2[k])] = true
+	say("%d other skinned pieces in the FBX; %d bones are weighted by at least one of them" % [piece_nodes.size(), shared_names.size()])
+	var miroir_path: String = A.get("miroir-prefab", fbx.get_base_dir().get_base_dir().get_base_dir().get_base_dir().path_join("BikitanAvatars/Miroir-Re/Miroir-Re.prefab"))
+	miroir_names = {}
+	if FileAccess.file_exists(miroir_path):
+		var MP := parse_prefab(miroir_path)
+		for id in MP["tf"]:
+			miroir_names[tf_name(MP, id)] = true
+		say("Miroir skeleton (READ-ONLY reference): %d transforms in %s" % [miroir_names.size(), miroir_path.get_file()])
+	else:
+		say("FAIL Miroir prefab not found at %s: pass --miroir-prefab" % miroir_path)
+		fails += 1
+		return
+	for l in merge_info(prefab_path):
+		say("MergeArmature in the outfit prefab: " + l)
 	var fz: PackedStringArray = String(A.get("freeze", "")).split(",", false)
+	var merged_list := PackedStringArray()
 	for j in nb:
-		if (A.has("exclusive") and shared_names.has(bnames[j])) or bnames[j] in fz:
+		var nm_j: String = bnames[j]
+		if miroir_names.has(nm_j):
+			merged_list.append(nm_j)
+		if excl and (shared_names.has(nm_j) or miroir_names.has(nm_j)):
 			frozen[j] = true
-	if not frozen.is_empty():
-		var fl := PackedStringArray()
-		for j in frozen:
-			fl.append(bnames[j])
-		say("frozen (kept at their prefab transform): %d bones: %s" % [frozen.size(), ", ".join(fl.slice(0, 40))])
+		if nm_j in fz:
+			frozen[j] = true
+	say("outfit bones that carry a Miroir bone's name (merged onto the Miroir bone by name when worn): %d: %s" % [merged_list.size(), ", ".join(merged_list)])
+	if excl:
+		# a movable bone drags all its descendants: freeze any bone that has a Miroir-named or other-piece bone below it
+		var cannot := {}
+		for tid in P["tf"]:
+			var nmb := tf_name(P, tid)
+			if miroir_names.has(nmb) or shared_names.has(nmb):
+				var c: int = P["tf"][tid]["father"]
+				while c != 0 and P["tf"].has(c) and not cannot.has(c):
+					cannot[c] = true
+					c = P["tf"][c]["father"]
+		var anc_frozen := PackedStringArray()
+		for j in nb:
+			if cannot.has(bind_tid[j]) and not frozen.has(j):
+				frozen[j] = true
+				anc_frozen.append(bnames[j])
+		say("frozen because a Miroir-named or other-piece bone hangs below them (moving them would drag it): %d: %s" % [anc_frozen.size(), ", ".join(anc_frozen)])
+	var fl := PackedStringArray()
+	for j in frozen:
+		fl.append(bnames[j])
+	say("frozen (kept at their prefab transform): %d of %d bones" % [frozen.size(), nb])
 	# Godot vertices (all surfaces, in order)
 	var gv := PackedVector3Array()
 	var gb := PackedInt32Array()
@@ -443,6 +486,58 @@ func run() -> void:
 	var e0 := err_stats(pose_orig, orig)
 	say("bake reproduction (FBX skin at the prefab pose vs garment_own bin): %s  [x sign %+d]" % [fmt(e0), int(best["sgn"])])
 	check("skin at the prefab pose reproduces the baked vertices to 1e-4 m (max)", e0["max"] < 1e-4, fmt(e0))
+	var chain := build_chain(P, ubones)
+	if A.has("stage1-analysis"):
+		# ANALYSIS ONLY, never applied: re-seat the clothing skeleton onto the Miroir skeleton. The Miroir is only the
+		# target reference. Per-bone translation of the paired joints (joints.txt names, source_skeleton.obj = clothing,
+		# target_skeleton.obj = Miroir), carried to every descendant (a child moves with its nearest paired ancestor).
+		say("=== STAGE 1 ANALYSIS (re-seat the shared clothing skeleton on the Miroir skeleton): ANALYSIS NOT APPLIED, nothing here is a deliverable ===")
+		var ed: String = A["stage1-analysis"]
+		var jn := FileAccess.get_file_as_string(ed.path_join("joints.txt")).split("\n", false)
+		var sv := obj_verts(ed.path_join("source_skeleton.obj"))
+		var tv := obj_verts(ed.path_join("target_skeleton.obj"))
+		var off := {}
+		for i in jn.size():
+			off[jn[i].strip_edges()] = tv[i] - sv[i]
+			say("   paired joint %-12s clothing -> Miroir offset (%+.4f, %+.4f, %+.4f) m" % [jn[i].strip_edges(), off[jn[i].strip_edges()].x, off[jn[i].strip_edges()].y, off[jn[i].strip_edges()].z])
+		var sane := 0.0
+		for tid in chain:
+			var nmt := tf_name(P, tid)
+			if off.has(nmt):
+				sane = maxf(sane, (world_of(P, tid).origin - sv[jn.find(nmt)]).length())
+		say("   check: clothing joints in the prefab vs source_skeleton.obj, max distance %.9f m" % sane)
+		var moved_n := 0
+		for tid in chain:
+			var c: int = tid
+			var o := Vector3.ZERO
+			while c != 0 and P["tf"].has(c):
+				if off.has(tf_name(P, c)):
+					o = off[tf_name(P, c)]
+					break
+				c = P["tf"][c]["father"]
+			var w0 := world_of(P, tid)
+			base_w[tid] = Transform3D(w0.basis, w0.origin + o)
+			if o != Vector3.ZERO:
+				moved_n += 1
+		say("   stage 1 translates %d of %d hierarchy joints (nearest paired ancestor's offset)" % [moved_n, chain.size()])
+		var Pm1: Array = []
+		for j in nb:
+			Pm1.append(base_w[bind_tid[j]])
+		var s1 := lbs(Pm1)
+		var e_s1 := err_stats(s1, target)
+		var bsq := sumsq(target, orig)
+		say("   STAGE 1 ALONE, skirt: error vs cloth-fit target: %s  explained %.4f%% (unfitted movement mean %.6f)" % [fmt(e_s1), 100.0 * (1.0 - sumsq(s1, target) / bsq), err_stats(orig, target)["mean"]])
+		var p0m := {}
+		for tid in chain:
+			p0m[tid] = world_of(P, tid)
+		for nd in piece_nodes:
+			var pm := piece_movement(nd, sk, uname, p0m, base_w, best["sgn"], int(A.get("max-influences", "4")))
+			say("   stage 1 moves piece %-14s: %d vertices, movement mean %.4f m max %.4f m, mean vector (%+.4f, %+.4f, %+.4f)" % [nd.name, pm["n"], pm["mean"], pm["max"], pm["vec"].x, pm["vec"].y, pm["vec"].z])
+		var skm := piece_movement(mi, sk, uname, p0m, base_w, best["sgn"], int(A.get("max-influences", "4")))
+		say("   (the skirt itself, stage 1 movement: mean %.4f m max %.4f m)" % [skm["mean"], skm["max"]])
+		Pm = Pm1
+		pose_orig = lbs(Pm)
+		say("=== STAGE 2 ANALYSIS: exclusive bones, rigid, fitted on top of stage 1 (analysis not applied) ===")
 
 	# --- bones with weight
 	var used := PackedInt32Array()
@@ -458,6 +553,13 @@ func run() -> void:
 		if wtot[j] > 0.0 and not frozen.has(j):
 			slot[j] = used.size()
 			used.append(j)
+	if used.is_empty():
+		say("FAIL no movable bone carries weight for this mesh (every weighted bone is shared with another piece or merged onto the Miroir). If another mesh of the FBX is a variant of the same garment, pass --same-piece \"(B)Kimono_Big\".")
+		fails += 1
+		var rf0 := FileAccess.open(out_dir.path_join(name + "_bone_fit_report.txt"), FileAccess.WRITE)
+		rf0.store_string("\n".join(out_lines) + "\n")
+		rf0.close()
+		return
 	var n := used.size()
 	var d := 4 * n
 	say("bones in skin %d, with weight %d  ->  %d unknowns (12 per bone), %d equations (3 per vertex)" % [nb, n, 12 * n, 3 * nv])
@@ -504,7 +606,6 @@ func run() -> void:
 	for i in d:
 		tr += ata[i * d + i]
 	say("normal matrix %dx%d, trace %.9f" % [d, d, tr])
-	var chain := build_chain(P, ubones)
 	say("hierarchy: %d joints (the SMR bones plus their ancestors)" % chain.size())
 	var delta_mag := PackedFloat64Array()
 	delta_mag.resize(nv)
@@ -571,6 +672,58 @@ func run() -> void:
 	for e in mini(8, tops.size()):
 		say("   heaviest bone %d: %s (total weight %.1f): origin moves %.4f m, rotates %.2f deg" % [e + 1, tops[e][1], tops[e][0], tops[e][2], tops[e][3]])
 
+	# --- which bones moved, and the Miroir / shared assertions
+	var rzr: Dictionary = results["rt"]["rz"]
+	var moved_names := PackedStringArray()
+	var follower_names := PackedStringArray()
+	var bad_miroir := PackedStringArray()
+	var bad_shared := PackedStringArray()
+	var untouched_dev := 0.0
+	for tid in chain:
+		var tpf: Dictionary = P["tf"][tid]
+		var l: Dictionary = rzr["local"][tid]
+		var dloc: float = (l["pos"] - tpf["pos"]).length() + (absf((l["quat"] as Quaternion).x - (tpf["rot"] as Quaternion).x) + absf((l["quat"] as Quaternion).y - (tpf["rot"] as Quaternion).y) + absf((l["quat"] as Quaternion).z - (tpf["rot"] as Quaternion).z) + absf((l["quat"] as Quaternion).w - (tpf["rot"] as Quaternion).w)) + (l["scl"] - tpf["scl"]).length()
+		var nmx := tf_name(P, tid)
+		var wd: float = ((rzr["world"][tid] as Transform3D).origin - (base_w.get(tid, world_of(P, tid)) as Transform3D).origin).length()
+		if dloc > 1e-6:
+			moved_names.append(nmx)
+			if miroir_names.has(nmx):
+				bad_miroir.append(nmx)
+			if shared_names.has(nmx):
+				bad_shared.append(nmx)
+		elif wd > 1e-7:
+			follower_names.append(nmx)
+			if miroir_names.has(nmx):
+				bad_miroir.append(nmx + " (follower)")
+			if shared_names.has(nmx):
+				bad_shared.append(nmx + " (follower)")
+		else:
+			untouched_dev = maxf(untouched_dev, dloc)
+	say("--- BONES MOVED (rigid fit): %d: %s" % [moved_names.size(), ", ".join(moved_names)])
+	say("--- bones that follow a moved parent unchanged in local space (world moves, nothing authored): %d: %s" % [follower_names.size(), ", ".join(follower_names)])
+	check("ASSERT (a) no moved or following bone is a Miroir bone (name found in the Miroir prefab's %d transforms; MergeArmature merges those by name)" % miroir_names.size(), bad_miroir.is_empty(), ", ".join(bad_miroir))
+	check("ASSERT (b) no moved or following bone is weighted by another piece of the outfit", bad_shared.is_empty(), ", ".join(bad_shared))
+	check("ASSERT every other joint keeps its prefab local transform (max deviation %.9f)" % untouched_dev, untouched_dev < 1e-6)
+	# who can follow the movable bones: how well are the vertices covered by movable weight
+	var grp_n := [0, 0, 0]
+	var grp_e := [0.0, 0.0, 0.0]
+	var grp_s := [0.0, 0.0, 0.0]
+	var tot_s := 0.0
+	for u in nv:
+		var wm := 0.0
+		var g := gmap[u] * stride
+		for s in stride:
+			if g_w[g + s] > 0.0 and slot.has(g_bones[g + s]):
+				wm += g_w[g + s]
+		var gi := 0 if wm >= 0.999 else (1 if wm > 0.001 else 2)
+		var ee: float = results["rt"]["pos"][u].distance_to(target[u])
+		grp_n[gi] += 1
+		grp_e[gi] += ee
+		grp_s[gi] += ee * ee
+		tot_s += ee * ee
+	for gi in 3:
+		say("   vertices with movable weight %s: %d, mean error %.6f m, share of the residual squared error %.1f%%" % [["= 1", "between 0 and 1", "= 0 (only bones that may not move)"][gi], grp_n[gi], grp_e[gi] / maxi(grp_n[gi], 1), 100.0 * grp_s[gi] / maxf(tot_s, 1e-12)])
+
 	# --- planted control: move the heaviest bone 1 cm along x in world; the skinned vertices must move by weight * 1 cm
 	var heavy: int = used[0]
 	for j in used:
@@ -615,10 +768,15 @@ func run() -> void:
 
 	# --- deliverables
 	var elf_path: String = A.get("usd-elf", "/private/tmp/claude-502/-Users-ernest-lee-Desktop-entities-fabric/b8beae81-4e98-4e20-8054-433eb7abd11b/scratchpad/usd.post-blendshape.elf")
-	write_local_table(out_dir.path_join(name + "_bones_local_rt.txt"), P, chain, results["rt"]["rz"])
-	write_local_table(out_dir.path_join(name + "_bones_local_trs.txt"), P, chain, results["trs"]["rz"])
-	write_usd(out_dir, name, elf_path, P, chain, bind_tid, binds, best["sgn"], mi, gv, ob, orig, target, results, nb)
-	var rf := FileAccess.open(out_dir.path_join(name + "_bone_fit_report.txt"), FileAccess.WRITE)
+	var report_name := name + "_bone_fit_report.txt"
+	if analysis_only:
+		report_name = name + "_analysis_not_applied_report.txt"
+		say("ANALYSIS NOT APPLIED: no clip, table or mesh is written for this run")
+	else:
+		write_local_table(out_dir.path_join(name + "_bones_local_rt.txt"), P, chain, results["rt"]["rz"])
+		write_local_table(out_dir.path_join(name + "_bones_local_trs.txt"), P, chain, results["trs"]["rz"])
+		write_usd(out_dir, name, elf_path, P, chain, bind_tid, binds, best["sgn"], mi, gv, ob, orig, target, results, nb)
+	var rf := FileAccess.open(out_dir.path_join(report_name), FileAccess.WRITE)
 	rf.store_string("\n".join(out_lines) + "\n")
 	rf.close()
 	say("done in %d ms, %d failed checks" % [Time.get_ticks_msec() - t0, fails])
@@ -857,38 +1015,48 @@ func build_chain(P: Dictionary, ubones: Array) -> Array:
 	return ids
 
 # Top-down projection of the world targets onto local TRS (mode trs / rt). Returns the realised worlds and locals.
+
 func realize(P: Dictionary, chain: Array, bind_tid: PackedInt64Array, Nw: Array, used: PackedInt32Array, mode: String) -> Dictionary:
 	var target := {}
-	for tid in chain:
-		target[tid] = world_of(P, tid)
+	var changed := {}
 	for j in used:
 		target[bind_tid[j]] = Nw[j]
+		changed[bind_tid[j]] = true
 	var W := {}
 	var local := {}
 	var shear := 0.0
 	var sdev := 0.0
 	var nonuni := 0.0
-	var changed := {}
-	for j in used:
-		changed[bind_tid[j]] = true
 	for tid in chain:
 		var fa: int = P["tf"][tid]["father"]
+		var bw: Transform3D = base_w.get(tid, world_of(P, tid))
+		var t0: Dictionary = P["tf"][tid]
 		if fa == 0 or not W.has(fa):
-			W[tid] = world_of(P, tid)
-			var t0: Dictionary = P["tf"][tid]
+			W[tid] = bw
 			local[tid] = {"pos": t0["pos"], "quat": t0["rot"], "scl": t0["scl"]}
+			continue
+		if not changed.has(tid):
+			# not moved: keeps its own local transform, so it follows a moved parent
+			var bl: Transform3D = (base_w.get(fa, world_of(P, fa)) as Transform3D).affine_inverse() * bw
+			if base_w.is_empty():
+				W[tid] = (W[fa] as Transform3D) * Transform3D(Basis(t0["rot"]) * Basis.from_scale(t0["scl"]), t0["pos"])
+				local[tid] = {"pos": t0["pos"], "quat": t0["rot"], "scl": t0["scl"]}
+			else:
+				var R0 := polar(bl.basis)
+				var S0 := R0.transposed() * bl.basis
+				W[tid] = (W[fa] as Transform3D) * bl
+				local[tid] = {"pos": bl.origin, "quat": quat_of(R0), "scl": Vector3(S0.x.x, S0.y.y, S0.z.z)}
 			continue
 		var L: Transform3D = (W[fa] as Transform3D).affine_inverse() * (target[tid] as Transform3D)
 		var R := polar(L.basis)
 		var S := R.transposed() * L.basis
 		var scl := Vector3(S.x.x, S.y.y, S.z.z)
-		if changed.has(tid):
-			var off := maxf(maxf(absf(S.x.y), absf(S.x.z)), maxf(absf(S.y.z), absf(S.y.x)))
-			off = maxf(off, maxf(absf(S.z.x), absf(S.z.y)))
-			shear = maxf(shear, off / maxf((scl.x + scl.y + scl.z) / 3.0, 1e-9))
-			sdev = maxf(sdev, maxf(absf(scl.x - 1.0), maxf(absf(scl.y - 1.0), absf(scl.z - 1.0))))
-			var mn := (scl.x + scl.y + scl.z) / 3.0
-			nonuni = maxf(nonuni, maxf(absf(scl.x - mn), maxf(absf(scl.y - mn), absf(scl.z - mn))))
+		var off := maxf(maxf(absf(S.x.y), absf(S.x.z)), maxf(absf(S.y.z), absf(S.y.x)))
+		off = maxf(off, maxf(absf(S.z.x), absf(S.z.y)))
+		shear = maxf(shear, off / maxf((scl.x + scl.y + scl.z) / 3.0, 1e-9))
+		sdev = maxf(sdev, maxf(absf(scl.x - 1.0), maxf(absf(scl.y - 1.0), absf(scl.z - 1.0))))
+		var mn := (scl.x + scl.y + scl.z) / 3.0
+		nonuni = maxf(nonuni, maxf(absf(scl.x - mn), maxf(absf(scl.y - mn), absf(scl.z - mn))))
 		if mode == "rt":
 			scl = Vector3.ONE
 		var lt := Transform3D(R * Basis.from_scale(scl), L.origin)
@@ -1113,3 +1281,71 @@ func wdiff(i: int, j: int) -> float:
 	for k in d:
 		t += absf(d[k])
 	return t
+
+var analysis_only := false
+var shared_names := {}
+var miroir_names := {}
+var base_w := {}   # stage-1 analysis only: transform id -> re-seated world (empty = the prefab pose)
+
+# Modular Avatar MergeArmature settings found in the outfit prefab (text scan)
+func merge_info(prefab_path: String) -> PackedStringArray:
+	var out := PackedStringArray()
+	var ls := FileAccess.get_file_as_string(prefab_path).split("\n")
+	for i in ls.size():
+		if ls[i].strip_edges() == "mergeTarget:":
+			var s := ""
+			for k in range(i + 1, mini(i + 12, ls.size())):
+				var t := ls[k].strip_edges()
+				if t.begins_with("referencePath:") or t.begins_with("prefix:") or t.begins_with("suffix:") or t.begins_with("LockMode:") or t.begins_with("mangleNames:"):
+					s += t + "; "
+			out.append(s)
+	return out
+
+func obj_verts(p: String) -> PackedVector3Array:
+	var o := PackedVector3Array()
+	for l in FileAccess.get_file_as_string(p).split("\n"):
+		if l.begins_with("v "):
+			var q := l.split(" ", false)
+			o.append(Vector3(float(q[1]), float(q[2]), float(q[3])))
+	return o
+
+# Movement of another piece's original vertices when the clothing bones go from world p0 to p1 (ids -> Transform3D).
+func piece_movement(nd: MeshInstance3D, sk: Skeleton3D, uname: Dictionary, p0: Dictionary, p1: Dictionary, sgn: float, maxinf: int) -> Dictionary:
+	var skin: Skin = nd.skin
+	var tids := PackedInt64Array()
+	for j in skin.get_bind_count():
+		var bi := skin.get_bind_bone(j)
+		tids.append(uname.get(sk.get_bone_name(bi), 0) if bi >= 0 else 0)
+	var n := 0
+	var sum := 0.0
+	var mx := 0.0
+	var vs := Vector3.ZERO
+	var m: ArrayMesh = nd.mesh
+	for s in m.get_surface_count():
+		var ar := m.surface_get_arrays(s)
+		var v: PackedVector3Array = ar[Mesh.ARRAY_VERTEX]
+		var bb: PackedInt32Array = ar[Mesh.ARRAY_BONES]
+		var ww: PackedFloat32Array = ar[Mesh.ARRAY_WEIGHTS]
+		var st := bb.size() / v.size()
+		for i in v.size():
+			var order: Array = range(st)
+			if maxinf > 0 and maxinf < st:
+				order.sort_custom(func(x, y): return ww[i * st + x] > ww[i * st + y])
+				order = order.slice(0, maxinf)
+			var keep := 0.0
+			for r in order:
+				keep += ww[i * st + r]
+			var d := Vector3.ZERO
+			for r in order:
+				var w := ww[i * st + r]
+				var tid: int = tids[bb[i * st + r]]
+				if w <= 0.0 or tid == 0:
+					continue
+				var q: Vector3 = skin.get_bind_pose(bb[i * st + r]) * v[i]
+				q = Vector3(q.x * sgn, q.y, q.z)
+				d += ((p1[tid] as Transform3D) * q - (p0[tid] as Transform3D) * q) * (w / keep)
+			n += 1
+			sum += d.length()
+			mx = maxf(mx, d.length())
+			vs += d
+	return {"n": n, "mean": sum / maxi(n, 1), "max": mx, "vec": vs / maxi(n, 1)}
