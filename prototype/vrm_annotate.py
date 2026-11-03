@@ -37,6 +37,10 @@ for s in ("left", "right"):   # a finger bone needs the one before it in its cha
         for a, b in zip(names, names[1:]):
             if b in H and a not in H: del H[b]
 H.pop("upperChest", None)   # optional in VRM 1.0
+for s_ in ("left", "right"):   # a shoulder is the joint an upper arm hangs from; skin-weight matching can land on a helper joint above it (the finch's right one)
+    ua = H.get(s_ + "UpperArm")
+    if ua is not None and par.get(ua) in jset and par[ua] != H.get("chest"):
+        H[s_ + "Shoulder"] = par[ua]
 REQ = "hips spine head leftUpperLeg leftLowerLeg leftFoot rightUpperLeg rightLowerLeg rightFoot leftUpperArm leftLowerArm leftHand rightUpperArm rightLowerArm rightHand".split()
 missing = [r for r in REQ if r not in H]; assert not missing, f"required humanoid bones without a joint: {missing}"
 assert len(set(H.values())) == len(H), "two humanoid bones on one node"
