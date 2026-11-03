@@ -122,6 +122,7 @@ class Rig:
         self.caps = [(g, int(m.geom_bodyid[g])) for g in range(m.ngeom) if m.geom_type[g] == mujoco.mjtGeom.mjGEOM_CAPSULE
                      and (m.geom_contype[g] or m.geom_conaffinity[g]) and m.body(m.geom_bodyid[g]).name.split("_")[0] in ("calcn", "toes")]
         self.w_floor = W_FLOOR
+        self.ground = None  # optional height of the ground under a world xy (stairs, ramps); None is the flat floor at z = 0
 
     def sites(self):
         out = np.array([np.mean([self.d.xpos[b] for b in bs], axis=0) for bs in self.bodies])
@@ -154,7 +155,7 @@ class Rig:
             half, rad = m.geom_size[g][1], m.geom_size[g][0]
             for sign in (-1.0, 1.0):
                 pt = p + sign * Rg[:, 2] * half
-                viol = FLOOR_MARGIN - (pt[2] - rad)
+                viol = FLOOR_MARGIN - (pt[2] - rad - (self.ground(pt[:2]) if self.ground else 0.0))
                 if viol > 0:
                     mujoco.mj_jac(m, d, jp, None, pt, b)
                     val += viol * viol
@@ -170,8 +171,10 @@ class Rig:
             mujoco.mj_kinematics(m, d)
             for g, _ in self.caps:
                 Rg, p = d.geom_xmat[g].reshape(3, 3), d.geom_xpos[g]
-                low = min((p + Rg[:, 2] * m.geom_size[g][1])[2], (p - Rg[:, 2] * m.geom_size[g][1])[2]) - m.geom_size[g][0]
-                out[f] = max(out[f], -low)
+                for sign in (-1.0, 1.0):
+                    pt = p + sign * Rg[:, 2] * m.geom_size[g][1]
+                    low = pt[2] - m.geom_size[g][0] - (self.ground(pt[:2]) if self.ground else 0.0)
+                    out[f] = max(out[f], -low)
         return out
 
     def solve(self, targets, bounded=True, tag=""):
