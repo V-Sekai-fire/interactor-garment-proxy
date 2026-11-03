@@ -849,6 +849,10 @@ func run() -> void:
 	for e in mini(8, tops.size()):
 		say("   heaviest bone %d: %s (total weight %.1f): origin moves %.4f m, rotates %.2f deg" % [e + 1, tops[e][1], tops[e][0], tops[e][2], tops[e][3]])
 
+	if A.get("solver", "") == "fk":
+		var cx := {"P": P, "chain": chain, "bind_tid": bind_tid, "nb": nb, "target": target, "orig": orig}
+		fk_stage(cx, results, frozen, used, slot)
+
 	# --- which bones moved, and the Miroir / shared assertions
 	var rzr: Dictionary = results[primary_key]["rz"]
 	var moved_names := PackedStringArray()
@@ -1684,3 +1688,338 @@ func seg_report(label: String, pos: PackedVector3Array, target: PackedVector3Arr
 
 var primary_key := "rt"            # which result is checked, delivered as the main clip and used for the effect on the other pieces
 var clip_modes: Array = ["trs", "rt"]
+
+# ================================================================== forward-kinematics nonlinear solver (--solver fk)
+# The hot loops are in fk_solve.cpp (native, called through OS.execute); this side prepares its input, reads its output and
+# measures, verifies and delivers the result.
+
+var planted_scale := {}
+
+func fk_binary() -> String:
+	var here: String = (get_script() as Script).resource_path.get_base_dir()
+	var cpp := here.path_join("fk_solve.cpp")
+	var bin: String = A.get("fk-bin", "/private/tmp/claude-502/-Users-ernest-lee-Desktop-entities-fabric/b8beae81-4e98-4e20-8054-433eb7abd11b/scratchpad/fk_solve")
+	if not FileAccess.file_exists(bin) or FileAccess.get_modified_time(bin) < FileAccess.get_modified_time(cpp):
+		var o: Array = []
+		var rc := OS.execute("clang++", ["-O3", "-std=c++17", cpp, "-o", bin], o, true)
+		say("compiled fk_solve.cpp with clang++ (exit %d)" % rc)
+	return bin
+
+func fk_prepare(cx: Dictionary) -> bool:
+	var P: Dictionary = cx["P"]
+	var chain: Array = cx["chain"]
+	var bind_tid: PackedInt64Array = cx["bind_tid"]
+	var jidx := {}
+	for i in chain.size():
+		jidx[chain[i]] = i
+	var J := chain.size()
+	var parent := PackedInt32Array()
+	var pos0 := PackedFloat64Array()
+	var q0 := PackedFloat64Array()
+	var s0 := PackedFloat64Array()
+	for i in J:
+		var t: Dictionary = P["tf"][chain[i]]
+		parent.append(jidx.get(t["father"], -1))
+		pos0.append_array(PackedFloat64Array([t["pos"].x, t["pos"].y, t["pos"].z]))
+		var q: Quaternion = t["rot"]
+		q0.append_array(PackedFloat64Array([q.x, q.y, q.z, q.w]))
+		s0.append_array(PackedFloat64Array([t["scl"].x, t["scl"].y, t["scl"].z]))
+	var inj := PackedInt32Array()
+	var inw := PackedFloat64Array()
+	var inq := PackedFloat64Array()
+	var tg := PackedFloat64Array()
+	var uw := PackedFloat64Array()
+	var target: PackedVector3Array = cx["target"]
+	for u in nv:
+		var g := gmap[u] * stride
+		var n := 0
+		for s in stride:
+			if g_w[g + s] > 0.0:
+				if n >= 4:
+					say("FAIL a vertex has more than 4 non-zero influences: run with --max-influences 4")
+					fails += 1
+					return false
+				inj.append(jidx[bind_tid[g_bones[g + s]]])
+				inw.append(g_w[g + s])
+				inq.append_array(PackedFloat64Array([g_q[g + s].x, g_q[g + s].y, g_q[g + s].z]))
+				n += 1
+		while n < 4:
+			inj.append(0)
+			inw.append(0.0)
+			inq.append_array(PackedFloat64Array([0.0, 0.0, 0.0]))
+			n += 1
+		tg.append_array(PackedFloat64Array([target[u].x, target[u].y, target[u].z]))
+		uw.append(u_weight[u])
+	cx["jidx"] = jidx
+	cx["fk"] = {"J": J, "parent": parent, "pos0": pos0, "q0": q0, "s0": s0, "inj": inj, "inw": inw, "inq": inq, "tg": tg, "uw": uw}
+	return true
+
+# var_tids: Array of transform ids that are variable; masks: tid -> PackedInt32Array(9); init: tid -> PackedFloat64Array(9)
+func fk_run(cx: Dictionary, var_tids: Array, masks: Dictionary, init: Dictionary, regs: Vector3, check_mode: bool, label: String) -> Dictionary:
+	var d: Dictionary = cx["fk"]
+	var jidx: Dictionary = cx["jidx"]
+	var J: int = d["J"]
+	var vidx := PackedInt32Array()
+	vidx.resize(J)
+	vidx.fill(-1)
+	var mask := PackedInt32Array()
+	var ini := PackedFloat64Array()
+	for k in var_tids.size():
+		vidx[jidx[var_tids[k]]] = k
+		mask.append_array(masks[var_tids[k]])
+		ini.append_array(init[var_tids[k]])
+	var work: String = String(A["out"]).path_join("fk_work")
+	DirAccess.make_dir_recursive_absolute(work)
+	var inp := work.path_join("in.bin")
+	var outp := work.path_join("out.bin")
+	var f := FileAccess.open(inp, FileAccess.WRITE)
+	f.store_buffer(PackedInt32Array([J, nv, var_tids.size(), 1 if check_mode else 0, int(A.get("fk-maxit", "100")), 0, 0, 0]).to_byte_array())
+	f.store_buffer(PackedFloat64Array([regs.x, regs.y, regs.z, float(A.get("fk-tol", "1e-7")), 1e-3]).to_byte_array())
+	f.store_buffer((d["parent"] as PackedInt32Array).to_byte_array())
+	f.store_buffer(vidx.to_byte_array())
+	f.store_buffer(mask.to_byte_array())
+	f.store_buffer((d["pos0"] as PackedFloat64Array).to_byte_array())
+	f.store_buffer((d["q0"] as PackedFloat64Array).to_byte_array())
+	f.store_buffer((d["s0"] as PackedFloat64Array).to_byte_array())
+	f.store_buffer(ini.to_byte_array())
+	f.store_buffer((d["inj"] as PackedInt32Array).to_byte_array())
+	f.store_buffer((d["inw"] as PackedFloat64Array).to_byte_array())
+	f.store_buffer((d["inq"] as PackedFloat64Array).to_byte_array())
+	f.store_buffer((d["tg"] as PackedFloat64Array).to_byte_array())
+	f.store_buffer((d["uw"] as PackedFloat64Array).to_byte_array())
+	f.close()
+	var t0w := Time.get_ticks_msec()
+	var o: Array = []
+	var rc := OS.execute(fk_binary(), [inp, outp], o, true)
+	var wall := (Time.get_ticks_msec() - t0w) / 1000.0
+	var log := String(o[0]) if o.size() > 0 else ""
+	if rc != 0 or not FileAccess.file_exists(outp):
+		say("FAIL fk_solve exited %d: %s" % [rc, log.left(300)])
+		fails += 1
+		return {}
+	if check_mode:
+		var line := ""
+		for l in log.split("\n"):
+			if l.begins_with("CHECK"):
+				line = l
+		return {"check": line}
+	var bytes := FileAccess.get_file_as_bytes(outp)
+	var iters := bytes.decode_s32(0)
+	var evals := bytes.decode_s32(4)
+	var c0 := bytes.decode_double(16)
+	var c1 := bytes.decode_double(24)
+	var npar := var_tids.size() * 9
+	var par := bytes.slice(32, 32 + npar * 8).to_float64_array()
+	var recs := bytes.slice(32 + npar * 8).to_float64_array()
+	var P: Dictionary = cx["P"]
+	var chain: Array = cx["chain"]
+	var world := {}
+	var local := {}
+	for i in J:
+		var tid: int = chain[i]
+		var o2 := i * 22
+		world[tid] = Transform3D(Basis(Vector3(recs[o2 + 10], recs[o2 + 13], recs[o2 + 16]), Vector3(recs[o2 + 11], recs[o2 + 14], recs[o2 + 17]), Vector3(recs[o2 + 12], recs[o2 + 15], recs[o2 + 18])), Vector3(recs[o2 + 19], recs[o2 + 20], recs[o2 + 21]))
+		var t: Dictionary = P["tf"][tid]
+		if vidx[i] < 0:
+			local[tid] = {"pos": t["pos"], "quat": t["rot"], "scl": t["scl"]}
+		else:
+			var q := Quaternion(recs[o2 + 3], recs[o2 + 4], recs[o2 + 5], recs[o2 + 6])
+			if q.dot(t["rot"]) < 0.0:
+				q = Quaternion(-q.x, -q.y, -q.z, -q.w)
+			local[tid] = {"pos": Vector3(recs[o2], recs[o2 + 1], recs[o2 + 2]), "quat": q, "scl": Vector3(recs[o2 + 7], recs[o2 + 8], recs[o2 + 9])}
+	return {"par": par, "world": world, "local": local, "iters": iters, "evals": evals, "c0": c0, "c1": c1, "wall": wall, "log": log, "var_tids": var_tids, "label": label}
+
+func fk_init_from(cx: Dictionary, var_tids: Array, from_rz: Dictionary) -> Dictionary:
+	var P: Dictionary = cx["P"]
+	var init := {}
+	for tid in var_tids:
+		var t: Dictionary = P["tf"][tid]
+		var l: Dictionary = from_rz["local"][tid]
+		var dq: Quaternion = (t["rot"] as Quaternion).inverse() * (l["quat"] as Quaternion)
+		if dq.w < 0.0:
+			dq = Quaternion(-dq.x, -dq.y, -dq.z, -dq.w)
+		var ang := 2.0 * acos(clampf(dq.w, -1.0, 1.0))
+		var ax := Vector3(dq.x, dq.y, dq.z)
+		var dr := Vector3.ZERO if ax.length() < 1e-12 else ax.normalized() * ang
+		var dt: Vector3 = l["pos"] - t["pos"]
+		var ls := Vector3(log(maxf(l["scl"].x / t["scl"].x, 1e-9)), log(maxf(l["scl"].y / t["scl"].y, 1e-9)), log(maxf(l["scl"].z / t["scl"].z, 1e-9)))
+		init[tid] = PackedFloat64Array([dt.x, dt.y, dt.z, dr.x, dr.y, dr.z, ls.x, ls.y, ls.z])
+	return init
+
+func fk_zero_init(var_tids: Array) -> Dictionary:
+	var init := {}
+	for tid in var_tids:
+		init[tid] = PackedFloat64Array([0, 0, 0, 0, 0, 0, 0, 0, 0])
+	return init
+
+func fk_masks(var_tids: Array, scale_free: bool) -> Dictionary:
+	var m := {}
+	for tid in var_tids:
+		m[tid] = PackedInt32Array([1, 1, 1, 1, 1, 1, 1 if scale_free else 0, 1 if scale_free else 0, 1 if scale_free else 0])
+	return m
+
+# independent GDScript forward kinematics from local dictionaries (pos, quat, scl)
+func fk_worlds(P: Dictionary, chain: Array, loc: Dictionary) -> Dictionary:
+	var W := {}
+	for tid in chain:
+		var l: Dictionary = loc[tid]
+		var lt := Transform3D(Basis(l["quat"]) * Basis.from_scale(l["scl"]), l["pos"])
+		var fa: int = P["tf"][tid]["father"]
+		W[tid] = (W[fa] as Transform3D) * lt if W.has(fa) else lt
+	return W
+
+# measure a solver result against the target and keep it under results[key]
+func fk_measure(cx: Dictionary, res: Dictionary, key: String, results: Dictionary, label: String, dof: int) -> void:
+	var chain: Array = cx["chain"]
+	var P: Dictionary = cx["P"]
+	var bind_tid: PackedInt64Array = cx["bind_tid"]
+	var nb: int = cx["nb"]
+	var target: PackedVector3Array = cx["target"]
+	var orig: PackedVector3Array = cx["orig"]
+	var wb: Array = []
+	for j in nb:
+		wb.append(res["world"][bind_tid[j]])
+	var pos := lbs(wb)
+	var es := err_stats(pos, target)
+	var base_sq := sumsq(target, orig)
+	var expl := 100.0 * (1.0 - sumsq(pos, target) / base_sq)
+	var rz := {"world": res["world"], "local": res["local"], "shear": 0.0, "scale_dev": 0.0, "nonuni": 0.0}
+	results[key] = {"pos": pos, "rz": rz, "e": es, "wb": wb}
+	# statistics of the solution
+	var par: PackedFloat64Array = res["par"]
+	var max_ls := 0.0
+	var max_dr := 0.0
+	var max_dt := 0.0
+	for k in (res["var_tids"] as Array).size():
+		max_dt = maxf(max_dt, Vector3(par[k * 9], par[k * 9 + 1], par[k * 9 + 2]).length())
+		max_dr = maxf(max_dr, Vector3(par[k * 9 + 3], par[k * 9 + 4], par[k * 9 + 5]).length())
+		max_ls = maxf(max_ls, maxf(absf(par[k * 9 + 6]), maxf(absf(par[k * 9 + 7]), absf(par[k * 9 + 8]))))
+	var shear := 0.0
+	var nonuni := 0.0
+	for tid in chain:
+		var w: Transform3D = res["world"][tid]
+		var w0 := world_of(P, tid)
+		if (w.origin - w0.origin).length() + (w.basis.x - w0.basis.x).length() + (w.basis.y - w0.basis.y).length() + (w.basis.z - w0.basis.z).length() < 1e-9:
+			continue
+		var R := polar(w.basis)
+		var S := R.transposed() * w.basis
+		var mean_d := (S.x.x + S.y.y + S.z.z) / 3.0
+		var off := maxf(maxf(absf(S.x.y), absf(S.x.z)), maxf(absf(S.y.z), maxf(absf(S.y.x), maxf(absf(S.z.x), absf(S.z.y)))))
+		shear = maxf(shear, off / maxf(mean_d, 1e-9))
+		nonuni = maxf(nonuni, maxf(absf(S.x.x - mean_d), maxf(absf(S.y.y - mean_d), absf(S.z.y * 0.0 + S.z.z - mean_d))) / maxf(mean_d, 1e-9))
+	say("FK-TABLE %-34s %3d DOF: mean %.6f p99 %.6f max %.6f m, explained %.4f%% | %d iterations, %d cost evaluations, %.2f s wall | max |log scale| %.4f, max world shear %.4f, max world non-uniform scale spread %.4f, largest local rotation change %.2f deg, largest local translation change %.4f m" % [label, dof, es["mean"], es["p99"], es["max"], expl, res["iters"], res["evals"], res["wall"], max_ls, shear, nonuni, rad_to_deg(max_dr), max_dt])
+
+# The whole fk experiment for one mode: variable sets, runs, table, verification. Fills results[...] and primary_key / clip_modes.
+func fk_stage(cx: Dictionary, results: Dictionary, frozen: Dictionary, used: PackedInt32Array, slot: Dictionary) -> void:
+	var P: Dictionary = cx["P"]
+	var chain: Array = cx["chain"]
+	var bind_tid: PackedInt64Array = cx["bind_tid"]
+	var nb: int = cx["nb"]
+	if not fk_prepare(cx):
+		return
+	var regs := Vector3(float(A.get("fk-reg-t", "1e-4")), float(A.get("fk-reg-r", "1e-4")), float(A.get("fk-reg-s", "5e-2")))
+	say("=== FORWARD-KINEMATICS NONLINEAR SOLVER (fk_solve.cpp, Levenberg-Marquardt, analytic chain-rule Jacobian through the hierarchy); regularisers translation %.2e rotation %.2e log-scale %.2e ===" % [regs.x, regs.y, regs.z])
+	var bind_of := {}
+	for j in nb:
+		bind_of[bind_tid[j]] = j
+	var weighted: Array = []
+	var wset := {}
+	for j in used:
+		weighted.append(bind_tid[j])
+		wset[bind_tid[j]] = true
+	var anc: Array = []
+	var aset := {}
+	for tid in weighted:
+		var c: int = P["tf"][tid]["father"]
+		while c != 0 and P["tf"].has(c):
+			if bind_of.has(c) and not frozen.has(bind_of[c]) and not wset.has(c) and not aset.has(c):
+				aset[c] = true
+				anc.append(c)
+			c = P["tf"][c]["father"]
+	var ordered_anc: Array = []
+	var ordered_w: Array = []
+	for tid in chain:
+		if aset.has(tid):
+			ordered_anc.append(tid)
+		if wset.has(tid):
+			ordered_w.append(tid)
+	var anc_desc := PackedStringArray()
+	for tid in ordered_anc:
+		var w0 := world_of(P, tid)
+		var vert := 0
+		var best := 0.0
+		for ax in 3:
+			var col: Vector3 = [w0.basis.x, w0.basis.y, w0.basis.z][ax].normalized()
+			if absf(col.y) > best:
+				best = absf(col.y)
+				vert = ax
+		anc_desc.append("%s (parent %s, local axis %s is the vertical one in world, local pos (%.3f, %.3f, %.3f))" % [tf_name(P, tid), tf_name(P, P["tf"][tid]["father"]), ["x", "y", "z"][vert], P["tf"][tid]["pos"].x, P["tf"][tid]["pos"].y, P["tf"][tid]["pos"].z])
+	say("   movable bones with skin weight: %d; movable UNWEIGHTED bones above them in the chain (extra degrees of freedom through FK): %d: %s" % [ordered_w.size(), ordered_anc.size(), "; ".join(anc_desc)])
+	var all_var: Array = ordered_anc + ordered_w
+	var rt_rz: Dictionary = results["rt"]["rz"]
+	var init_all := fk_init_from(cx, all_var, rt_rz)
+	# Jacobian check on random parameters, all 9 DOF, ancestors free
+	var chk := fk_run(cx, all_var, fk_masks(all_var, true), init_all, regs, true, "check")
+	if not chk.is_empty():
+		var line: String = chk["check"]
+		var rel := float(line.split("relative error (norm) ")[1].split(",")[0]) if line.contains("relative error (norm) ") else 1.0
+		check("Jacobian check: analytic FK gradient vs central finite differences of the cost at random parameters (%s)" % line.replace("CHECK ", ""), rel < 1e-5)
+	var cfgs := [["fk_rt_nanc", "FK rigid (T+R), weighted bones only", false, false], ["fk_rt", "FK rigid (T+R), + unweighted ancestors", false, true], ["fk_s_nanc", "FK free scale (9 DOF), weighted bones only", true, false], ["fk_s", "FK free scale (9 DOF), + unweighted ancestors", true, true]]
+	for cfg in cfgs:
+		var vt: Array = (ordered_anc + ordered_w) if cfg[3] else ordered_w
+		var ini := fk_init_from(cx, vt, rt_rz)
+		if cfg[2]:
+			pass
+		var res := fk_run(cx, vt, fk_masks(vt, cfg[2]), ini, regs, false, cfg[1])
+		if res.is_empty():
+			continue
+		fk_measure(cx, res, cfg[0], results, cfg[1], vt.size() * (9 if cfg[2] else 6))
+	# restricted model: the topmost unweighted movable bone(s): translation, one rotation about the local vertical axis, 2D scale in the local horizontal axes
+	var roots: Array = []
+	for tid in ordered_anc:
+		if not aset.has(P["tf"][tid]["father"]):
+			roots.append(tid)
+	if not roots.is_empty():
+		var rmask := {}
+		var rdesc := PackedStringArray()
+		for tid in roots:
+			var w0 := world_of(P, tid)
+			var vert := 0
+			var best := 0.0
+			for ax in 3:
+				var col: Vector3 = [w0.basis.x, w0.basis.y, w0.basis.z][ax].normalized()
+				if absf(col.y) > best:
+					best = absf(col.y)
+					vert = ax
+			var m := PackedInt32Array([1, 1, 1, 0, 0, 0, 0, 0, 0])
+			m[3 + vert] = 1
+			for ax in 3:
+				if ax != vert:
+					m[6 + ax] = 1
+			rmask[tid] = m
+			rdesc.append("%s: translation (3) + rotation about local %s + log-scale along local %s,%s = 6" % [tf_name(P, tid), ["x", "y", "z"][vert], ["x", "y", "z"][(vert + 1) % 3], ["x", "y", "z"][(vert + 2) % 3]])
+		say("   restricted root model: " + "; ".join(rdesc))
+		var ra := fk_run(cx, roots, rmask, fk_zero_init(roots), regs, false, "root only")
+		if not ra.is_empty():
+			fk_measure(cx, ra, "fk_root2d_only", results, "root 2D-scale + T + yaw ONLY", roots.size() * 6)
+			# stage B: per-bone rigid refinement of the other bones, root fixed at the stage-A values
+			var vt2: Array = roots.duplicate()
+			var masks2 := {}
+			var init2 := {}
+			var par: PackedFloat64Array = ra["par"]
+			for k in roots.size():
+				masks2[roots[k]] = PackedInt32Array([0, 0, 0, 0, 0, 0, 0, 0, 0])
+				init2[roots[k]] = par.slice(k * 9, k * 9 + 9)
+			for tid in ordered_anc + ordered_w:
+				if roots.has(tid):
+					continue
+				vt2.append(tid)
+				masks2[tid] = PackedInt32Array([1, 1, 1, 1, 1, 1, 0, 0, 0])
+				init2[tid] = PackedFloat64Array([0, 0, 0, 0, 0, 0, 0, 0, 0])
+			var rb := fk_run(cx, vt2, masks2, init2, regs, false, "root + refine")
+			if not rb.is_empty():
+				fk_measure(cx, rb, "fk_root2d", results, "root 2D-scale+T+yaw, then rigid refinement", roots.size() * 6 + (vt2.size() - roots.size()) * 6)
+	else:
+		say("   no unweighted movable root-like bone in this mode: the restricted root model does not apply")
+	primary_key = "fk_rt" if results.has("fk_rt") else "rt"
+	clip_modes = ["fk_rt", "fk_s"] if results.has("fk_rt") else ["trs", "rt"]
