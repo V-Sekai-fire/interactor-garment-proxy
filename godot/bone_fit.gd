@@ -850,7 +850,7 @@ func run() -> void:
 		say("   heaviest bone %d: %s (total weight %.1f): origin moves %.4f m, rotates %.2f deg" % [e + 1, tops[e][1], tops[e][0], tops[e][2], tops[e][3]])
 
 	# --- which bones moved, and the Miroir / shared assertions
-	var rzr: Dictionary = results["rt"]["rz"]
+	var rzr: Dictionary = results[primary_key]["rz"]
 	var moved_names := PackedStringArray()
 	var moved_shared := PackedStringArray()
 	var follower_names := PackedStringArray()
@@ -903,7 +903,7 @@ func run() -> void:
 			if g_w[g + s] > 0.0 and slot.has(g_bones[g + s]):
 				wm += g_w[g + s]
 		var gi := 5 if wm >= 0.999 else (4 if wm > 0.75 else (3 if wm > 0.5 else (2 if wm > 0.25 else (1 if wm > 0.001 else 0))))
-		var ee: float = results["rt"]["pos"][u].distance_to(target[u])
+		var ee: float = results[primary_key]["pos"][u].distance_to(target[u])
 		var mv: float = (target[u] - orig[u]).length_squared()
 		grp_n[gi] += 1
 		grp_e[gi] += ee
@@ -929,7 +929,7 @@ func run() -> void:
 	for j in used:
 		if wtot[j] > wtot[heavy]:
 			heavy = j
-	var wb2: Array = results["rt"]["wb"].duplicate()
+	var wb2: Array = results[primary_key]["wb"].duplicate()
 	wb2[heavy] = Transform3D(wb2[heavy].basis, wb2[heavy].origin + Vector3(0.01, 0, 0))
 	var pert := lbs(wb2)
 	var maxpred := 0.0
@@ -941,7 +941,7 @@ func run() -> void:
 		for s in stride:
 			if g_bones[g + s] == heavy:
 				wh += g_w[g + s]
-		var act: float = (pert[u] - results["rt"]["pos"][u]).length()
+		var act: float = (pert[u] - results[primary_key]["pos"][u]).length()
 		maxpred = maxf(maxpred, wh * 0.01)
 		maxact = maxf(maxact, act)
 		mism = maxf(mism, absf(act - wh * 0.01))
@@ -951,7 +951,7 @@ func run() -> void:
 	var mw_n := 0.0
 	for u in nv:
 		if u_weight[u] > 0.0:
-			mw_before += results["rt"]["pos"][u].distance_to(target[u]) * u_weight[u]
+			mw_before += results[primary_key]["pos"][u].distance_to(target[u]) * u_weight[u]
 			mw_after += pert[u].distance_to(target[u]) * u_weight[u]
 			mw_n += u_weight[u]
 	check("planted control: bone %s off by 1 cm in x moves vertices by weight * 1 cm (max predicted %.9f, measured %.9f, worst mismatch %.9f)" % [tf_name(P, bind_tid[heavy]), maxpred, maxact, mism], mism < 1e-7 and maxact > 0.0)
@@ -981,7 +981,7 @@ func run() -> void:
 		report_name = name + "_analysis_not_applied_report.txt"
 		say("ANALYSIS NOT APPLIED: no clip, table or mesh is written for this run")
 	else:
-		write_local_table(out_dir.path_join(name + "_bones_local_rt.txt"), P, chain, results["rt"]["rz"])
+		write_local_table(out_dir.path_join(name + "_bones_local_%s.txt" % primary_key), P, chain, results[primary_key]["rz"])
 		write_local_table(out_dir.path_join(name + "_bones_local_trs.txt"), P, chain, results["trs"]["rz"])
 		write_usd(out_dir, name, elf_path, P, chain, bind_tid, binds, best["sgn"], mi, gv, ob, orig, target, results, nb)
 	var rf := FileAccess.open(out_dir.path_join(report_name), FileAccess.WRITE)
@@ -1346,7 +1346,7 @@ func write_usd(out_dir: String, name: String, elf_path: String, P: Dictionary, c
 	check("fitted target mesh .usdz written", typeof(pkg) == TYPE_PACKED_BYTE_ARRAY and pkg.size() > 2 and pkg[0] == 0x50, str(pkg).left(200))
 	if typeof(pkg) == TYPE_PACKED_BYTE_ARRAY:
 		save_bytes(out_dir.path_join(name + "_fitted_target.usdz"), pkg)
-	var pkg2 = write_mesh_plain(sb, name + "_skinned_newbones", results["rt"]["pos"], tri)
+	var pkg2 = write_mesh_plain(sb, name + "_skinned_newbones", results[primary_key]["pos"], tri)
 	check("skinned-by-new-bones mesh .usdz written", typeof(pkg2) == TYPE_PACKED_BYTE_ARRAY and pkg2.size() > 2 and pkg2[0] == 0x50, str(pkg2).left(200))
 	if typeof(pkg2) == TYPE_PACKED_BYTE_ARRAY:
 		save_bytes(out_dir.path_join(name + "_skinned_newbones.usdz"), pkg2)
@@ -1378,7 +1378,7 @@ func write_usd(out_dir: String, name: String, elf_path: String, P: Dictionary, c
 		rests.append_array(floats12(lt))
 		rests.append_array(floats12(bind_world.get(tid, world_of(P, tid))))
 	# clips: frame 0 = rest (original locals), frame 1 = fitted
-	for mode in ["trs", "rt"]:
+	for mode in clip_modes:
 		var rz: Dictionary = results[mode]["rz"]
 		var al := PackedFloat32Array()
 		var aj := PackedInt32Array()
@@ -1454,7 +1454,7 @@ func write_usd(out_dir: String, name: String, elf_path: String, P: Dictionary, c
 	for k in J:
 		var t: Dictionary = P["tf"][chain[k]]
 		rest_local.append_array(floats12(Transform3D(Basis(t["rot"]) * Basis.from_scale(t["scl"]), t["pos"])))
-		fit_local.append_array(floats12(local_t(results["rt"]["rz"]["local"][chain[k]])))
+		fit_local.append_array(floats12(local_t(results[primary_key]["rz"]["local"][chain[k]])))
 	var usd_orig = sb2.vmcall("usd_mesh_skin_pose", 0, rest_local, false)
 	var usd_fit = sb2.vmcall("usd_mesh_skin_pose", 0, fit_local, false)
 	if typeof(usd_orig) != TYPE_PACKED_FLOAT32_ARRAY or typeof(usd_fit) != TYPE_PACKED_FLOAT32_ARRAY:
@@ -1469,13 +1469,13 @@ func write_usd(out_dir: String, name: String, elf_path: String, P: Dictionary, c
 		pf[u] = Vector3(usd_fit[u * 3], usd_fit[u * 3 + 1], usd_fit[u * 3 + 2])
 	var e_o := err_stats(po, orig)
 	var e_f := err_stats(pf, target)
-	var e_f2 := err_stats(pf, results["rt"]["pos"])
+	var e_f2 := err_stats(pf, results[primary_key]["pos"])
 	say("OpenUSD's own skinning (usd_mesh_skin_pose), original locals vs the baked bin: %s" % fmt(e_o))
 	say("OpenUSD's own skinning, fitted rigid locals vs target: %s" % fmt(e_f))
 	say("OpenUSD's own skinning vs this script's skinning of the same TRS bones: %s" % fmt(e_f2))
 	check("OpenUSD skinning with the fitted locals agrees with this script's (<1e-4 m)", e_f2["max"] < 1e-4, fmt(e_f2))
-	if clip_back.has("rt"):
-		var back: PackedFloat32Array = clip_back["rt"].slice(J * 12, 2 * J * 12)
+	if clip_back.has(primary_key):
+		var back: PackedFloat32Array = clip_back[primary_key].slice(J * 12, 2 * J * 12)
 		var uc = sb2.vmcall("usd_mesh_skin_pose", 0, back, false)
 		var pc := PackedVector3Array()
 		pc.resize(nv)
@@ -1483,7 +1483,7 @@ func write_usd(out_dir: String, name: String, elf_path: String, P: Dictionary, c
 			pc[u] = Vector3(uc[u * 3], uc[u * 3 + 1], uc[u * 3 + 2])
 		var e_c := err_stats(pc, target)
 		say("END TO END: the delivered rigid clip read back from the .usda (frame 1), skinned by OpenUSD on the bind-pose mesh, vs target: %s  explained %.4f%%" % [fmt(e_c), 100.0 * (1.0 - sumsq(pc, target) / sumsq(target, orig))])
-		check("end to end error within 1 mm of the script's own rigid result (mean)", absf(e_c["mean"] - results["rt"]["e"]["mean"]) < 1e-3)
+		check("end to end error within 1 mm of the script's own rigid result (mean)", absf(e_c["mean"] - results[primary_key]["e"]["mean"]) < 1e-3)
 
 # summed |weight difference| per bone between two Godot vertices' influence sets
 func wdiff(i: int, j: int) -> float:
@@ -1681,3 +1681,6 @@ func seg_report(label: String, pos: PackedVector3Array, target: PackedVector3Arr
 		var den := sumsq(ts, os)
 		var expl := ("%.4f%%" % (100.0 * (1.0 - sumsq(ps, ts) / den))) if den > 1e-9 else "n/a (target equals original)"
 		say("   [%s] piece %s: error vs its target %s  explained %s (unfitted movement mean %.6f)" % [label, seg_names[k], fmt(err_stats(ps, ts)), expl, err_stats(os, ts)["mean"]])
+
+var primary_key := "rt"            # which result is checked, delivered as the main clip and used for the effect on the other pieces
+var clip_modes: Array = ["trs", "rt"]
