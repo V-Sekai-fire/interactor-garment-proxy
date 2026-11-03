@@ -37,6 +37,22 @@ for s in ("left", "right"):   # a finger bone needs the one before it in its cha
         for a, b in zip(names, names[1:]):
             if b in H and a not in H: del H[b]
 H.pop("upperChest", None)   # optional in VRM 1.0
+def is_below(n_, top):   # n_ is a descendant of top
+    while n_ in par:
+        n_ = par[n_]
+        if n_ == top: return True
+    return False
+for s_ in ("left", "right"):   # extremities by what hangs off them: the hand is what the fingers hang from, the foot what the toes hang from; skin-weight matching lands on twist helpers beside them
+    for ext, below, lower, upper in (("Hand", ("IndexProximal", "MiddleProximal", "RingProximal", "LittleProximal", "ThumbMetacarpal"), "LowerArm", "UpperArm"), ("Foot", ("Toes",), "LowerLeg", "UpperLeg")):
+        ups = H.get(s_ + upper)
+        below_nodes = [H[s_ + b] for b in below if s_ + b in H]
+        votes = [par.get(k) for k in below_nodes]
+        if ups is None or not votes: continue
+        cand = max(set(votes), key=votes.count)   # the parent most of them share
+        if cand in jset and cand != ups and is_below(cand, ups):
+            H[s_ + ext] = cand
+            low = par.get(cand)
+            if low in jset and low != ups and is_below(low, ups): H[s_ + lower] = low
 for s_ in ("left", "right"):   # a shoulder is the joint an upper arm hangs from; skin-weight matching can land on a helper joint above it (the finch's right one)
     ua = H.get(s_ + "UpperArm")
     if ua is not None and par.get(ua) in jset and par[ua] != H.get("chest"):
