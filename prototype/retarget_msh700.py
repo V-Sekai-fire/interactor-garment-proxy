@@ -12,7 +12,8 @@
 # (2) knee and elbow flexion inside the model's ranges, control = a solution with flexion pushed out of range.
 # Result on the four clips (see the PR): walk, run and jump_forward pass; crouch_walk fails gate 1 (head mean 0.036 m) because the spine
 # joints L5_S1_FE and T12_L1_FE sit on their -0.5 rad limit for the whole clip: the model's spine bends less than the clip's crouch.
-#   uv run --with mujoco --with numpy --with scipy python retarget_msh700.py <MS-Human-700.xml> <motion_dir> [--clips walk,run,...]
+#   uv run --with mujoco --with numpy --with scipy python retarget_msh700.py <MS-Human-700.xml> <motion_dir> [--clips walk,run,...] [--out=DIR]
+import json
 import os
 import sys
 
@@ -210,6 +211,7 @@ def main():
         sys.exit(__doc__ or "usage: retarget_msh700.py <MS-Human-700.xml> <motion_dir> [--clips a,b]")
     xml, mdir = args[0], args[1]
     clips = CLIPS
+    out_dir = next((a.split("=", 1)[1] for a in sys.argv[1:] if a.startswith("--out=")), None)
     for a in sys.argv[1:]:
         if a.startswith("--clips="):
             clips = a.split("=", 1)[1].split(",")
@@ -231,6 +233,13 @@ def main():
         sc = segment_scales(rig, S)
         T = build_targets(S, sc)
         q = rig.solve(T)
+        if out_dir:  # the solved qpos of the whole model, (frames, nq), for whoever drives the model with it
+            os.makedirs(out_dir, exist_ok=True)
+            np.save(os.path.join(out_dir, f"{name}.qpos.npy"), q)
+            meta = {"clip": name, "frames": int(q.shape[0]), "nq": int(q.shape[1]), "fps_assumed_not_checked": 30, "free_joint_names": list(FREE),
+                    "free_qpos_index": [int(i) for i in rig.free], "frame": "model frame: x forward, y left, z up; first-frame heading removed; starts at the horizontal origin",
+                    "site_error_mean_max_m": float(site_errors(rig.site_track(q), T).mean(0).max())}
+            json.dump(meta, open(os.path.join(out_dir, f"{name}.qpos.json"), "w"), indent=1)
         err = site_errors(rig.site_track(q), T)
         mean, p99 = err.mean(0), np.percentile(err, 99, axis=0)
         gate1 = mean.max() <= TOL_MEAN and p99.max() <= TOL_P99
