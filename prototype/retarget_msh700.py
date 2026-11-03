@@ -167,6 +167,9 @@ class Rig:
         bounds = list(zip(self.lo, self.hi)) if bounded else None
         if bounds:  # the root slides carry no anatomical range (the +-5 m is a placeholder), the clip's travel sets them
             bounds[:3] = [(None, None)] * 3
+            # the heading hinge is unlimited too: the model declares pelvis_rotation +-90 deg with limited="false", and the clip's
+            # heading (only the first frame's is removed) turns further than that in a circle, a pivot or a long take
+            bounds[FREE.index("pelvis_rotation")] = (None, None)
         for f in range(F):
             tgt, prev = targets[f].reshape(-1), x.copy()
 
@@ -253,6 +256,8 @@ def main():
         sys.exit(__doc__ or "usage: retarget_msh700.py <MS-Human-700.xml> <motion_dir> [--clips a,b]")
     xml, mdir = args[0], args[1]
     clips = CLIPS
+    fps = next((float(a.split("=", 1)[1]) for a in sys.argv[1:] if a.startswith("--fps=")), 30.0)  # the clips' frame rate, recorded in the json
+    skip_controls = "--skip-controls" in sys.argv  # bulk runs: gates only, the controls are three extra solves per clip
     out_dir = next((a.split("=", 1)[1] for a in sys.argv[1:] if a.startswith("--out=")), None)
     for a in sys.argv[1:]:
         if a.startswith("--clips="):
@@ -288,7 +293,7 @@ def main():
         if out_dir:  # the solved qpos of the whole model, (frames, nq), for whoever drives the model with it
             os.makedirs(out_dir, exist_ok=True)
             np.save(os.path.join(out_dir, f"{name}.qpos.npy"), q)
-            meta = {"clip": name, "frames": int(q.shape[0]), "nq": int(q.shape[1]), "fps_assumed_not_checked": 30, "free_joint_names": list(FREE),
+            meta = {"clip": name, "frames": int(q.shape[0]), "nq": int(q.shape[1]), "fps": fps, "fps_note": "given by --fps (default 30), not read from the clip", "free_joint_names": list(FREE),
                     "free_qpos_index": [int(i) for i in rig.free], "frame": "model frame: x forward, y left, z up; first-frame heading removed; starts at the horizontal origin",
                     "site_error_mean_max_m": float(site_errors(rig.site_track(q), T).mean(0).max())}
             json.dump(meta, open(os.path.join(out_dir, f"{name}.qpos.json"), "w"), indent=1)
@@ -306,21 +311,23 @@ def main():
         print(f"  GATE 3 floor: deepest {depth.max() * 1000:.1f} mm, frames over 1 mm {(depth > 0.001).mean():.0%} -> {'PASS' if g3 else 'FAIL'}")
         if not g3:
             fails.append(f"{name}: foot floor penetration")
-        rig.w_floor = 0.0
-        d0 = rig.floor_depth(rig.solve(T_plain))
-        rig.w_floor = W_FLOOR
-        c3 = d0.max() <= TOL_FLOOR and (d0 > 0.001).mean() < TOL_FLOOR_FRAC
-        print(f"  CONTROL 3 without the floor term: deepest {d0.max() * 1000:.1f} mm, frames over 1 mm {(d0 > 0.001).mean():.0%} -> gate {'PASS' if c3 else 'FAIL'} (must FAIL)")
-        if c3:
-            fails.append(f"{name}: control 3 did not fail")
-        # control 1: the shins asked 30% wrong must fail the same gate
-        sc_bad = dict(sc, l_ankle=sc["l_ankle"] * PLANT, r_ankle=sc["r_ankle"] * PLANT)  # the ankle segment is the shin (knee -> ankle)
-        Tb = build_targets(S, sc_bad)
-        eb = site_errors(rig.site_track(rig.solve(Tb)), Tb)
-        c1 = eb.mean(0).max() <= TOL_MEAN and np.percentile(eb, 99, axis=0).max() <= TOL_P99
-        print(f"  CONTROL 1 shin x{PLANT}: mean max {eb.mean(0).max():.4f} m, p99 max {np.percentile(eb, 99, axis=0).max():.4f} m -> gate {'PASS' if c1 else 'FAIL'} (must FAIL)")
-        if c1:
-            fails.append(f"{name}: control 1 did not fail")
+        if not skip_controls:
+            rig.w_floor = 0.0
+            d0 = rig.floor_depth(rig.solve(T_plain))
+            rig.w_floor = W_FLOOR
+            c3 = d0.max() <= TOL_FLOOR and (d0 > 0.001).mean() < TOL_FLOOR_FRAC
+            print(f"  CONTROL 3 without the floor term: deepest {d0.max() * 1000:.1f} mm, frames over 1 mm {(d0 > 0.001).mean():.0%} -> gate {'PASS' if c3 else 'FAIL'} (must FAIL)")
+            if c3:
+                fails.append(f"{name}: control 3 did not fail")
+        if not skip_controls:
+            # control 1: the shins asked 30% wrong must fail the same gate
+            sc_bad = dict(sc, l_ankle=sc["l_ankle"] * PLANT, r_ankle=sc["r_ankle"] * PLANT)  # the ankle segment is the shin (knee -> ankle)
+            Tb = build_targets(S, sc_bad)
+            eb = site_errors(rig.site_track(rig.solve(Tb)), Tb)
+            c1 = eb.mean(0).max() <= TOL_MEAN and np.percentile(eb, 99, axis=0).max() <= TOL_P99
+            print(f"  CONTROL 1 shin x{PLANT}: mean max {eb.mean(0).max():.4f} m, p99 max {np.percentile(eb, 99, axis=0).max():.4f} m -> gate {'PASS' if c1 else 'FAIL'} (must FAIL)")
+            if c1:
+                fails.append(f"{name}: control 1 did not fail")
         # gate 2: knee and elbow flexion inside the model's ranges
         rep = range_report(rig, q)
         g2, bad = flexion_gate(rep)
@@ -329,15 +336,16 @@ def main():
         print(f"  GATE 2 knee and elbow flexion inside ranges: {'PASS' if g2 else 'FAIL ' + str(bad)}")
         if not g2:
             fails.append(f"{name}: flexion range")
-        # control 2: the same report with the right knee pushed past 0 and the left elbow past its top must fail
-        rep_bad = {k: (v.copy(), r) for k, (v, r) in rep.items()}
-        rep_bad["knee_angle_r"][0][0] = -0.3
-        rep_bad["elbow_flexion_l"][0][-1] = rep["elbow_flexion_l"][1][1] + 0.3
-        c2, _ = flexion_gate(rep_bad)
-        print(f"  CONTROL 2 flexion pushed out of range: gate {'PASS' if c2 else 'FAIL'} (must FAIL)")
-        if c2:
-            fails.append(f"{name}: control 2 did not fail")
-    print("ALL GATES AND CONTROLS AS REQUIRED" if not fails else "PROBLEMS: " + "; ".join(fails))
+        if not skip_controls:
+            # control 2: the same report with the right knee pushed past 0 and the left elbow past its top must fail
+            rep_bad = {k: (v.copy(), r) for k, (v, r) in rep.items()}
+            rep_bad["knee_angle_r"][0][0] = -0.3
+            rep_bad["elbow_flexion_l"][0][-1] = rep["elbow_flexion_l"][1][1] + 0.3
+            c2, _ = flexion_gate(rep_bad)
+            print(f"  CONTROL 2 flexion pushed out of range: gate {'PASS' if c2 else 'FAIL'} (must FAIL)")
+            if c2:
+                fails.append(f"{name}: control 2 did not fail")
+    print(("ALL GATES PASS (controls skipped)" if skip_controls else "ALL GATES AND CONTROLS AS REQUIRED") if not fails else "PROBLEMS: " + "; ".join(fails))
     sys.exit(1 if fails else 0)
 
 
