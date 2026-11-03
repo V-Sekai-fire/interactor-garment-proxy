@@ -50,6 +50,7 @@ FREE = (["pelvis_tz", "pelvis_ty", "pelvis_tx", "pelvis_tilt", "pelvis_list", "p
         + [f"{j}_{s}" for s in "rl" for j in ("hip_flexion", "hip_adduction", "hip_rotation", "knee_angle", "ankle_angle", "subtalar_angle")]
         + ["L5_S1_FE", "L5_S1_LB", "L5_S1_AR", "T12_L1_FE", "T12_L1_LB", "T12_L1_AR", "T1_head_neck_FE", "T1_head_neck_LB", "T1_head_neck_AR"]
         + [f"{j}_{s}" for s in "rl" for j in ("elv_angle", "shoulder_elv", "shoulder_rot", "elbow_flexion", "pro_sup", "deviation", "flexion")])
+ANKLE_SOLE = 0.055  # [m] ankle joint to the sole, the model's colliding ankle height (SOMA feet are the same scale)
 W_FLOOR = 100.0  # weight of the foot-capsule floor penalty against the squared site error (both m^2)
 FLOOR_MARGIN = 0.001  # [m] keep the colliding foot capsules this far above z = 0
 TOL_FLOOR, TOL_FLOOR_FRAC = 0.002, 0.05  # gate: deepest capsule point [m] and the fraction of frames more than 1 mm under
@@ -220,6 +221,27 @@ class Rig:
         return out
 
 
+def ground_offset(P, names, fps, rest_h=0.013, dead=0.06, window_s=0.75, smooth_s=0.5):
+    """Ground height under the clip, per frame, when it is lower than the flat floor the model stands on (model frame, z up).
+
+    A source recorded with a step down has feet far below z = 0 although they stand on something, and no foot is ever below the
+    ground it stands on, so only the low side is certain. The lowest foot point (toe base, or ankle less the ankle-to-sole
+    height) is minimised over +-window_s (a flight phase has ground within that window on both sides), measured against
+    rest_h, the sole height of a standing foot in the source. Offsets above -dead are dropped, so a clip on the flat floor
+    returns zeros and is untouched; the rest is averaged over smooth_s so the step down is a ramp, not a jump. Higher ground
+    (a box) is left alone: feet on it stay where the source put them."""
+    from scipy.ndimage import minimum_filter1d, uniform_filter1d
+
+    ix = {n: i for i, n in enumerate(names)}
+    h = np.full(len(P), np.inf)
+    for side in ("Left", "Right"):
+        toe, foot = P[:, ix[f"{side}ToeBase"], 2], P[:, ix[f"{side}Foot"], 2]
+        h = np.minimum(h, np.minimum(toe, foot - ANKLE_SOLE))
+    low = minimum_filter1d(h, size=2 * int(round(window_s * fps)) + 1, mode="nearest") - rest_h
+    g = np.minimum(low + dead, 0.0)
+    return uniform_filter1d(g, size=max(int(round(smooth_s * fps)), 1), mode="nearest")
+
+
 def segment_scales(rig, S):
     """Per site: model rest segment length / median clip segment length (parent -> site); the root scale is the mean leg ratio."""
     sc = {}
@@ -291,6 +313,10 @@ def main():
         P, R = soma_fk(clip, parents)
         Rm = C @ yaw_matrix(R[0, 0])  # SOMA world -> model frame, heading removed
         P = np.einsum("ij,fnj->fni", Rm, P)
+        if "--ground" in sys.argv:  # opt-in: remove the ground height of a clip recorded on uneven ground
+            off = ground_offset(P, names, fps)
+            P[:, :, 2] -= off[:, None]
+            print(f"  ground offset: min {off.min():+.3f} m, max {off.max():+.3f} m, frames moved {int((off != 0).sum())} of {len(off)}")
         S = soma_sites(P, names)
         sc = segment_scales(rig, S)
         T = build_targets(S, sc)
