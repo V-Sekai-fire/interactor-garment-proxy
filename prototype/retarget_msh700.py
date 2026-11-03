@@ -1,0 +1,271 @@
+# Retarget Kimodo/SOMA30 motion clips onto MS-Human-700 (MuJoCo Menagerie, Apache-2.0) by solving joint angles per frame.
+# The clip is the 30-joint SOMA30 skeleton: per frame and joint 12 float32, a row-major 3x3 local rotation then the local offset
+# (the layout Retarget.lean in interactor-motion-retarget reads: rotation at +0..8, offset at +9..11; Y up, +Z forward, +X left).
+# Method: SOMA joints give 17 sites (pelvis, spine1, head, shoulder, elbow, wrist, hip, knee, ankle, toes; the table of MuscleMimic's
+# smplh_to_myofullbody.json, with head_neck for the head and hand_* for lunate_*). Targets are built down the site tree with one
+# scale per segment (model length / clip length), so the target is reachable in bone length and the gate measures the pose. The
+# per-frame joint angles come from bounded least squares (scipy L-BFGS-B) on the 17 site positions, bounds = the model's joint ranges.
+# Every rotation here is a 3x3 matrix (MuJoCo xmat for the model); no quaternions.
+# Free joints: pelvis 6, hip 3, knee, ankle, subtalar, lumbar/thoracic/neck 3 each, shoulder (elv_angle, shoulder_elv, shoulder_rot),
+# elbow_flexion, pro_sup, wrist 2. The coupled joints (knee translations, patella, clavicle, scapula) stay at 0.
+# Gates, each with a control that must fail: (1) site errors under a tolerance, control = shins planted 30% wrong;
+# (2) knee and elbow flexion inside the model's ranges, control = a solution with flexion pushed out of range.
+# Result on the four clips (see the PR): walk, run and jump_forward pass; crouch_walk fails gate 1 (head mean 0.036 m) because the spine
+# joints L5_S1_FE and T12_L1_FE sit on their -0.5 rad limit for the whole clip: the model's spine bends less than the clip's crouch.
+#   uv run --with mujoco --with numpy --with scipy python retarget_msh700.py <MS-Human-700.xml> <motion_dir> [--clips walk,run,...]
+import os
+import sys
+
+import mujoco
+import numpy as np
+from scipy.optimize import minimize
+
+TOL_MEAN = 0.030  # m, per-site mean over the frames. 1.8% of a 1.7 m body; the arms and spine of SOMA are not rigid like the model's
+TOL_P99 = 0.060  # m, per-site 99th percentile over the frames. The shortest segment (ankle to toes, 0.13 m) planted 30% wrong is 0.04 m;
+# the control plants the shin (0.40 m, 0.12 m error) so it must clear the p99 bound twice over
+CLIPS = ["walk", "run", "crouch_walk", "jump_forward"]
+PLANT = 1.3  # the planted fault: shin segment scale 30% wrong
+KNEE_RANGE_DEG, ELBOW_RANGE_DEG = 138.0, 126.0  # as the task states them; read back from the model and compared
+
+# (site, model point, SOMA point, parent site). ("mid", a, b) is the midpoint of two bodies / joints.
+SITES = [
+    ("pelvis", ("mid", "femur_r", "femur_l"), ("mid", "RightLeg", "LeftLeg"), None),
+    ("spine1", "lumbar1", "Chest", "pelvis"),
+    ("head", "head_neck", "Head", "spine1"),
+]
+for side, S in (("l", "Left"), ("r", "Right")):
+    SITES += [
+        (f"{side}_shoulder", f"humerus_{side}", f"{S}Arm", "spine1"),
+        (f"{side}_elbow", f"ulna_{side}", f"{S}ForeArm", f"{side}_shoulder"),
+        (f"{side}_wrist", f"hand_{side}", f"{S}Hand", f"{side}_elbow"),
+        (f"{side}_hip", f"femur_{side}", f"{S}Leg", "pelvis"),
+        (f"{side}_knee", f"tibia_{side}", f"{S}Shin", f"{side}_hip"),
+        (f"{side}_ankle", f"talus_{side}", f"{S}Foot", f"{side}_knee"),
+        (f"{side}_toes", f"toes_{side}", f"{S}ToeBase", f"{side}_ankle"),
+    ]
+SITE_NAMES = [s[0] for s in SITES]
+FREE = (["pelvis_tz", "pelvis_ty", "pelvis_tx", "pelvis_tilt", "pelvis_list", "pelvis_rotation"]
+        + [f"{j}_{s}" for s in "rl" for j in ("hip_flexion", "hip_adduction", "hip_rotation", "knee_angle", "ankle_angle", "subtalar_angle")]
+        + ["L5_S1_FE", "L5_S1_LB", "L5_S1_AR", "T12_L1_FE", "T12_L1_LB", "T12_L1_AR", "T1_head_neck_FE", "T1_head_neck_LB", "T1_head_neck_AR"]
+        + [f"{j}_{s}" for s in "rl" for j in ("elv_angle", "shoulder_elv", "shoulder_rot", "elbow_flexion", "pro_sup", "deviation", "flexion")])
+LAMBDA_PREV, LAMBDA_ZERO = 1e-5, 1e-5  # tie the angles the 17 positions cannot see (twists, wrist) to the last frame and to zero
+# SOMA (x left, y up, z forward) to the model (x forward, y left, z up): a cyclic permutation, det +1
+C = np.array([[0.0, 0.0, 1.0], [1.0, 0.0, 0.0], [0.0, 1.0, 0.0]])
+
+
+def load_clip(motion_dir, name):
+    a = np.fromfile(os.path.join(motion_dir, name + ".f32"), "<f4")
+    return a.reshape(-1, 30, 12).astype(np.float64)
+
+
+def soma_fk(clip, parents):
+    """World positions (F,30,3) and rotations (F,30,3,3): R_w = R_parent_w @ R_local, p_w = p_parent_w + R_parent_w @ offset."""
+    F = clip.shape[0]
+    P, R = np.zeros((F, 30, 3)), np.zeros((F, 30, 3, 3))
+    for j in range(30):
+        Rl, t = clip[:, j, :9].reshape(F, 3, 3), clip[:, j, 9:]
+        if parents[j] < 0:
+            R[:, j], P[:, j] = Rl, t
+        else:
+            R[:, j] = R[:, parents[j]] @ Rl
+            P[:, j] = P[:, parents[j]] + np.einsum("fij,fj->fi", R[:, parents[j]], t)
+    return P, R
+
+
+def soma_sites(P, names):
+    idx = {n: i for i, n in enumerate(names)}
+    out = np.zeros((P.shape[0], len(SITES), 3))
+    for k, (_, _, sp, _) in enumerate(SITES):
+        out[:, k] = (P[:, idx[sp[1]]] + P[:, idx[sp[2]]]) / 2 if isinstance(sp, tuple) else P[:, idx[sp]]
+    return out
+
+
+def yaw_matrix(R0):
+    """Rotation about SOMA up (Y) that turns the first frame's pelvis forward (R0 @ +Z) to +Z."""
+    f = R0 @ np.array([0.0, 0.0, 1.0])
+    a = np.arctan2(f[0], f[2])
+    c, s = np.cos(-a), np.sin(-a)
+    return np.array([[c, 0.0, s], [0.0, 1.0, 0.0], [-s, 0.0, c]])
+
+
+class Rig:
+    def __init__(self, xml):
+        self.m = mujoco.MjModel.from_xml_path(os.path.abspath(xml))
+        self.d = mujoco.MjData(self.m)
+        m = self.m
+        self.free = np.array([m.joint(n).qposadr[0] for n in FREE])
+        assert all(m.jnt_type[m.joint(n).id] in (2, 3) for n in FREE) and m.nq == m.nv  # slide/hinge only: qpos index = dof index
+        self.lo = m.jnt_range[[m.joint(n).id for n in FREE], 0].copy()
+        self.hi = m.jnt_range[[m.joint(n).id for n in FREE], 1].copy()
+        self.bodies = []
+        for _, mp, _, _ in SITES:
+            names = mp[1:] if isinstance(mp, tuple) else (mp,)
+            self.bodies.append([m.body(n).id for n in names])
+        mujoco.mj_forward(m, self.d)
+        self.rest = self.sites()
+
+    def sites(self):
+        return np.array([np.mean([self.d.xpos[b] for b in bs], axis=0) for bs in self.bodies])
+
+    def sites_jac(self):
+        """Site positions (17,3) and their Jacobian w.r.t. the free joints (17*3, nfree), after mj_kinematics."""
+        m, d = self.m, self.d
+        mujoco.mj_comPos(m, d)  # cdof, which mj_jacBody reads
+        J = np.zeros((len(SITES), 3, m.nv))
+        jp = np.zeros((3, m.nv))
+        for k, bs in enumerate(self.bodies):
+            for b in bs:
+                mujoco.mj_jacBody(m, d, jp, None, b)
+                J[k] += jp / len(bs)
+        return self.sites(), J[:, :, self.free].reshape(-1, len(self.free))
+
+    def solve(self, targets, bounded=True, tag=""):
+        """Per-frame bounded least squares over the free joints, each frame warm-started from the one before."""
+        m, d, F = self.m, self.d, targets.shape[0]
+        q = np.zeros((F, m.nq))
+        x = np.zeros(len(self.free))
+        x[:3] = 0.0
+        bounds = list(zip(self.lo, self.hi)) if bounded else None
+        if bounds:  # the root slides carry no anatomical range (the +-5 m is a placeholder), the clip's travel sets them
+            bounds[:3] = [(None, None)] * 3
+        for f in range(F):
+            tgt, prev = targets[f].reshape(-1), x.copy()
+
+            def fun(v):
+                d.qpos[:] = 0.0
+                d.qpos[self.free] = v
+                mujoco.mj_kinematics(m, d)
+                s, J = self.sites_jac()
+                r = s.reshape(-1) - tgt
+                val = r @ r + LAMBDA_PREV * np.sum((v - prev) ** 2) + LAMBDA_ZERO * np.sum(v**2)
+                return val, 2 * J.T @ r + 2 * LAMBDA_PREV * (v - prev) + 2 * LAMBDA_ZERO * v
+
+            if f == 0:  # root slides first (pelvis site onto its target), then everything
+                d.qpos[:] = 0.0
+                mujoco.mj_kinematics(m, d)
+                s, J = self.sites_jac()
+                x[:3] = np.linalg.lstsq(J[:3, :3], tgt[:3] - s[0], rcond=None)[0]
+            res = minimize(fun, x, jac=True, method="L-BFGS-B", bounds=bounds, options={"maxiter": 400, "ftol": 1e-14, "gtol": 1e-9})
+            x = res.x
+            q[f, self.free] = x
+        return q
+
+    def site_track(self, q):
+        out = np.zeros((q.shape[0], len(SITES), 3))
+        for f in range(q.shape[0]):
+            self.d.qpos[:] = q[f]
+            mujoco.mj_kinematics(self.m, self.d)
+            out[f] = self.sites()
+        return out
+
+
+def segment_scales(rig, S):
+    """Per site: model rest segment length / median clip segment length (parent -> site); the root scale is the mean leg ratio."""
+    sc = {}
+    ix = {n: i for i, n in enumerate(SITE_NAMES)}
+    for k, (n, _, _, par) in enumerate(SITES):
+        if par is None:
+            continue
+        ml = np.linalg.norm(rig.rest[k] - rig.rest[ix[par]])
+        cl = np.median(np.linalg.norm(S[:, k] - S[:, ix[par]], axis=1))
+        sc[n] = ml / cl
+    sc["root"] = float(np.mean([sc[f"{s}_{j}"] for s in "lr" for j in ("knee", "ankle")]))
+    return sc
+
+
+def build_targets(S, sc):
+    """S: clip sites (F,17,3) in the model frame. Targets down the tree: parent target + segment scale * clip segment vector."""
+    ix = {n: i for i, n in enumerate(SITE_NAMES)}
+    T = np.zeros_like(S)
+    T[:, 0] = sc["root"] * (S[:, 0] - np.array([S[0, 0, 0], S[0, 0, 1], 0.0]))  # start at the horizontal origin; height scaled
+    for k, (n, _, _, par) in enumerate(SITES):
+        if par is not None:
+            T[:, k] = T[:, ix[par]] + sc[n] * (S[:, k] - S[:, ix[par]])
+    return T
+
+
+def site_errors(track, T):
+    return np.linalg.norm(track - T, axis=2)  # (F,17)
+
+
+def range_report(rig, q):
+    """Knee and elbow flexion (rad) per side against the ranges stored in the model."""
+    m = rig.m
+    rep = {}
+    for j in ("knee_angle", "elbow_flexion"):
+        for s in "rl":
+            jid = m.joint(f"{j}_{s}").id
+            rep[f"{j}_{s}"] = (q[:, m.jnt_qposadr[jid]], m.jnt_range[jid])
+    return rep
+
+
+def flexion_gate(rep, eps=1e-6):
+    bad = [k for k, (v, r) in rep.items() if v.min() < r[0] - eps or v.max() > r[1] + eps]
+    return not bad, bad
+
+
+def main():
+    args = [a for a in sys.argv[1:] if not a.startswith("--")]
+    if len(args) < 2:
+        sys.exit(__doc__ or "usage: retarget_msh700.py <MS-Human-700.xml> <motion_dir> [--clips a,b]")
+    xml, mdir = args[0], args[1]
+    clips = CLIPS
+    for a in sys.argv[1:]:
+        if a.startswith("--clips="):
+            clips = a.split("=", 1)[1].split(",")
+    names = open(os.path.join(mdir, "skeleton.txt")).read().split()
+    parents = [int(x) for x in open(os.path.join(mdir, "parents.txt")).read().split()]
+    rig = Rig(xml)
+    m = rig.m
+    kr, er = m.jnt_range[m.joint("knee_angle_r").id], m.jnt_range[m.joint("elbow_flexion_r").id]
+    ok_rng = abs(np.degrees(kr[1]) - KNEE_RANGE_DEG) < 0.5 and abs(np.degrees(er[1]) - ELBOW_RANGE_DEG) < 0.5 and kr[0] == 0 == er[0]
+    print(f"model ranges: knee 0..{np.degrees(kr[1]):.1f} deg, elbow 0..{np.degrees(er[1]):.1f} deg (stated 138 / 126): {'ok' if ok_rng else 'MISMATCH'}")
+    fails = [] if ok_rng else ["model ranges differ from the stated ones"]
+    print(f"tolerance: per-site mean <= {TOL_MEAN} m and per-site p99 <= {TOL_P99} m; control = shin scale x{PLANT}")
+    for name in clips:
+        clip = load_clip(mdir, name)
+        P, R = soma_fk(clip, parents)
+        Rm = C @ yaw_matrix(R[0, 0])  # SOMA world -> model frame, heading removed
+        P = np.einsum("ij,fnj->fni", Rm, P)
+        S = soma_sites(P, names)
+        sc = segment_scales(rig, S)
+        T = build_targets(S, sc)
+        q = rig.solve(T)
+        err = site_errors(rig.site_track(q), T)
+        mean, p99 = err.mean(0), np.percentile(err, 99, axis=0)
+        gate1 = mean.max() <= TOL_MEAN and p99.max() <= TOL_P99
+        w = SITE_NAMES[int(np.argmax(mean))], SITE_NAMES[int(np.argmax(p99))]
+        print(f"[{name}] {clip.shape[0]} frames: site error mean max {mean.max():.4f} m ({w[0]}), p99 max {p99.max():.4f} m ({w[1]}), overall mean {err.mean():.4f} m")
+        print(f"  GATE 1 site errors under tolerance: {'PASS' if gate1 else 'FAIL'}")
+        if not gate1:
+            fails.append(f"{name}: site errors")
+        # control 1: the shins asked 30% wrong must fail the same gate
+        sc_bad = dict(sc, l_ankle=sc["l_ankle"] * PLANT, r_ankle=sc["r_ankle"] * PLANT)  # the ankle segment is the shin (knee -> ankle)
+        Tb = build_targets(S, sc_bad)
+        eb = site_errors(rig.site_track(rig.solve(Tb)), Tb)
+        c1 = eb.mean(0).max() <= TOL_MEAN and np.percentile(eb, 99, axis=0).max() <= TOL_P99
+        print(f"  CONTROL 1 shin x{PLANT}: mean max {eb.mean(0).max():.4f} m, p99 max {np.percentile(eb, 99, axis=0).max():.4f} m -> gate {'PASS' if c1 else 'FAIL'} (must FAIL)")
+        if c1:
+            fails.append(f"{name}: control 1 did not fail")
+        # gate 2: knee and elbow flexion inside the model's ranges
+        rep = range_report(rig, q)
+        g2, bad = flexion_gate(rep)
+        peaks = ", ".join(f"{k} {np.degrees(v.min()):.0f}..{np.degrees(v.max()):.0f}" for k, (v, _) in rep.items())
+        print(f"  flexion deg: {peaks}")
+        print(f"  GATE 2 knee and elbow flexion inside ranges: {'PASS' if g2 else 'FAIL ' + str(bad)}")
+        if not g2:
+            fails.append(f"{name}: flexion range")
+        # control 2: the same report with the right knee pushed past 0 and the left elbow past its top must fail
+        rep_bad = {k: (v.copy(), r) for k, (v, r) in rep.items()}
+        rep_bad["knee_angle_r"][0][0] = -0.3
+        rep_bad["elbow_flexion_l"][0][-1] = rep["elbow_flexion_l"][1][1] + 0.3
+        c2, _ = flexion_gate(rep_bad)
+        print(f"  CONTROL 2 flexion pushed out of range: gate {'PASS' if c2 else 'FAIL'} (must FAIL)")
+        if c2:
+            fails.append(f"{name}: control 2 did not fail")
+    print("ALL GATES AND CONTROLS AS REQUIRED" if not fails else "PROBLEMS: " + "; ".join(fails))
+    sys.exit(1 if fails else 0)
+
+
+if __name__ == "__main__":
+    main()
