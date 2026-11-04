@@ -52,7 +52,7 @@
     "curve_center_target_automatic_bone_generation" => true,
     "contact" => %{"enabled" => true, "dhat" => 0.002},
     "solver" => %{
-      "max_threads" => 10,
+      "max_threads" => 12,
       "linear" => %{"solver" => ["Eigen::PardisoLDLT", "Eigen::AccelerateLDLT", "Eigen::SimplicialLDLT"]},
       "augmented_lagrangian" => %{
         "initial_weight" => 1,
@@ -118,6 +118,36 @@
       # Loose (no-fit) parts: Unity y below the source hip joint (m).
       nofit: {:below_y, 0.7935},
       # Optional: adopt an existing cloth-fit run if its inputs are byte-identical to this driver's stage-3 assets.
+      adopt_cloth_fit: nil
+    },
+    # Torso layers (operator, 2026-11-03: "we have to shrink the kimono, the obi and the inner"). Same settings as the
+    # kimono, nothing loose (no part below y = 0), no shells dropped until the solver names them.
+    "AInner" => %{
+      mesh: "(A)Inner",
+      same_piece: [],
+      garment_thickness_m: 0.012,
+      avatar_thickness_m: 0.012,
+      garment_res: 160,
+      avatar_res: 160,
+      target_triangles: 20_000,
+      smooth_max_iter: 60,
+      jitter_seeds: %{garment: 7, avatar: 11},
+      drop_shell_ranks: [],
+      nofit: {:below_y, 0.0},
+      adopt_cloth_fit: nil
+    },
+    "AObi" => %{
+      mesh: "(A)Obi",
+      same_piece: [],
+      garment_thickness_m: 0.012,
+      avatar_thickness_m: 0.012,
+      garment_res: 160,
+      avatar_res: 160,
+      target_triangles: 20_000,
+      smooth_max_iter: 60,
+      jitter_seeds: %{garment: 7, avatar: 11},
+      drop_shell_ranks: [],
+      nofit: {:below_y, 0.0},
       adopt_cloth_fit: nil
     },
     "ASkirt" => %{
