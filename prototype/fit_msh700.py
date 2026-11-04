@@ -121,6 +121,19 @@ def widen(spec, parent, kid, key, want):
 tw = 1.2 if "--plant-shoulder" in sys.argv else 1.0   # the planted fault: the shoulder width asked 20% wrong
 widen(spec, "pelvis", "femur", "hip_width", tgt["hip_width"])
 widen(spec, "sternum", "clavicle", "shoulder_width", tgt["shoulder_width"] * tw)
+# The muscles follow the bones: each stored length range belongs to the old geometry, so it is cleared and MuJoCo recomputes it from
+# the scaled paths and joint limits; each muscle's peak force goes with the square of its path-length ratio (cross-section).
+_, _, dd = lengths(mj.MjSpec.from_file(xml))
+len_before = dd.actuator_length.copy()
+lr_before = m0.actuator_lengthrange.copy()
+after, _mtmp, dtmp = lengths(spec)
+len_after = dtmp.actuator_length.copy()
+for k, act in enumerate(spec.actuators):
+    r = len_after[k] / len_before[k]
+    act.lengthrange = np.array([0.0, 0.0])
+    gp = np.array(act.gainprm); bp = np.array(act.biasprm)
+    gp[2] *= r * r; bp[2] *= r * r
+    act.gainprm = gp; act.biasprm = bp
 after, m1, d1 = lengths(spec)
 print("scale factors:", {k: round(v, 4) for k, v in fac.items()}, "(forearm planted x%.2f)" % plant if plant else "")
 print("segment                 target  model before -> after   (relative error)")
@@ -131,6 +144,14 @@ for k in sorted(tgt):
     worst = max(worst, abs(e1))
     print(f"  {k:16s} {tgt[k]:7.4f}  {before[k]:7.4f} -> {after[k]:7.4f}   {100*e0:+7.1f}% -> {100*e1:+7.1f}%")
 print(f"GATE limb segments and the hip and shoulder widths match the character: worst relative error {worst:.2e} (tolerance 1e-3): {'PASS' if worst < 1e-3 else 'FAIL'}")
+pos0 = (len_before - lr_before[:, 0]) / (lr_before[:, 1] - lr_before[:, 0])   # where each muscle rests inside its length range
+pos1 = (d1.actuator_length - m1.actuator_lengthrange[:, 0]) / (m1.actuator_lengthrange[:, 1] - m1.actuator_lengthrange[:, 0])
+stale = (len_after - lr_before[:, 0]) / (lr_before[:, 1] - lr_before[:, 0])      # the control: the old ranges kept
+w_new, w_stale = float(np.abs(pos1 - pos0).max()), float(np.abs(stale - pos0).max())
+ok_m = w_new < 0.05 and np.isfinite(pos1).all()
+print(f"GATE muscles keep their place in the length range: worst shift {w_new:.3f} of the range over {m1.nu} muscles (tolerance 0.05): {'PASS' if ok_m else 'FAIL'}")
+print(f"CONTROL the old length ranges kept: worst shift {w_stale:.3f}: {'rejected' if w_stale >= 0.05 else 'NOT rejected'}")
+worst = max(worst, 0.0 if ok_m else 1.0)
 tmass0, tmass1 = float(m0.body_mass.sum()), float(m1.body_mass.sum())
 print(f"GATE model valid: {m1.nbody} bodies, {m1.nu} muscles, mass {tmass0:.1f} -> {tmass1:.1f} kg, forward step ok: {np.isfinite(d1.xpos).all()}")
 if plant is None:

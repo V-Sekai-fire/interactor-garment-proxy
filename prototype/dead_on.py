@@ -41,4 +41,4 @@ else:
         ok += bool(got)
         if not got: bad.append((k, t, n_px))
     print(f"dead-on: {len(tg)} cameras; marker seen (>= {MINPX} px): {seen}; blocked or off-surface: {blocked}; read with own id: {ok} ({100 * ok / max(seen, 1):.2f}%)")
-    print("GATE", "PASS" if seen and ok == seen else "FAIL", "failures (camera, id, px):", bad[:40])
+    print("GATE", "PASS" if seen and ok == seen else "FAIL", "failures (camera, id, px):", bad[:40]); json.dump([t for _, t, _ in bad], open(f"{out}/failures.json", "w"))   # every failing id, for DROP_IDS
