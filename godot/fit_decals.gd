@@ -124,8 +124,10 @@ func _init() -> void:
 	bgr.color = Color(0.07, 0.07, 0.08)
 	bgr.size = Vector2(1152, 648)
 	root.add_child(bgr)
-	root.size = Vector2i(1152, 648)
-	root.always_on_top = true   # a covered window stops drawing, and a render that waits on it stalls
+	root.size = Vector2i(int(OS.get_environment("WINW")) if OS.get_environment("WINW") != "" else 1152, int(OS.get_environment("WINH")) if OS.get_environment("WINH") != "" else 648)
+	root.always_on_top = true
+	if OS.get_environment("WINX") != "":
+		root.position = Vector2i(int(OS.get_environment("WINX")), int(OS.get_environment("WINY")))   # tile the instances so none covers another   # a covered window stops drawing, and a render that waits on it stalls
 	var status := Label.new()
 	status.position = Vector2(14, 10)
 	status.add_theme_font_size_override("font_size", 22)
@@ -159,7 +161,11 @@ func _init() -> void:
 				lists[i].append({"pos": [centre.x + dv.x * dist, centre.y + dv.y * dist, centre.z + dv.z * dist], "target": [centre.x, centre.y, centre.z], "up": upv, "fov": FOV})
 	print("cameras per column: ", lists[0].size(), " ", lists[1].size())
 	var nmax: int = maxi(lists[0].size(), lists[1].size())
+	var stride := maxi(int(OS.get_environment("SLICES")), 1)   # SLICES instances share the camera list: this one takes every SLICES-th camera, starting at SLICE
+	var phase := int(OS.get_environment("SLICE"))
 	for v in nmax:
+		if v % stride != phase:
+			continue
 		for i in 2:
 			if v >= lists[i].size():
 				continue
