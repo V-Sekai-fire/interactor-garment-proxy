@@ -66,12 +66,12 @@ func _init() -> void:
 	for v in views.size():
 		var az: float = views[v][0]
 		var el: float = views[v][1]
-		var dirv := Vector3(sin(deg_to_rad(az)) * cos(deg_to_rad(el)), sin(deg_to_rad(el)), cos(deg_to_rad(az)) * cos(deg_to_rad(el)))
+		var dirv := Vector3(sin(deg_to_rad(az)) * cos(deg_to_rad(el)), sin(deg_to_rad(el)), -cos(deg_to_rad(az)) * cos(deg_to_rad(el)))   # Pixal3D is Z-up: (x, y, z) -> (x, z, -y) for this Y-up scene
 		var row := {"view": v, "az": az, "el": el, "img": [], "lit": [], "red": 0}
 		for c in cols.size():
 			var cam: Camera3D = cells[c][1]
 			var eye: Vector3 = centre + dirv * dist
-			cam.look_at_from_position(eye, centre if not (control and c == 2) else eye + dirv, Vector3.UP)
+			cam.look_at_from_position(eye, centre if not (control and c == 2) else eye + dirv, Vector3.UP if absf(dirv.y) < 0.999 else Vector3(0, 0, 1))
 			var img: Image
 			var lit := 0
 			var red := 0
@@ -212,7 +212,7 @@ static func _hammersley(n: int) -> Array:
 			v += (k & 1) * f
 			k >>= 1
 			f *= 0.5
-		u = 2.0 * u if u < 0.25 else 2.0 / 3.0 * u + 1.0 / 3.0
+		# Pixal3D sphere_hammersley_sequence(n, N), offset (0, 0), remap False, as render_multiview calls it: no remap, no elevation clamp. View 0 is straight below.
 		var el := rad_to_deg(acos(1.0 - 2.0 * u) - PI / 2.0)
-		out.append([v * 360.0, clampf(el, -85.0, 85.0)])
+		out.append([v * 360.0, el])
 	return out
