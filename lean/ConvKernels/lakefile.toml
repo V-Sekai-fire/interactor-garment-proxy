@@ -1,0 +1,14 @@
+name = "ConvKernels"
+defaultTargets = ["ConvKernels", "emit_conv"]
+
+[[require]]
+name = "LeanSlang"
+git = "https://github.com/V-Sekai-fire/contract-lean-slang.git"
+rev = "60532aef8ed70cc669ecab481182d0636c9e1ac3"
+
+[[lean_lib]]
+name = "ConvKernels"
+
+[[lean_exe]]
+name = "emit_conv"
+root = "EmitConv"
